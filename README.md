@@ -11,6 +11,10 @@
 </p>
 
 <p align="center">
+  Made by <a href="https://asilturkmen.com"><strong>Asil Türkmen</strong></a>, full-stack developer · 🌐 <a href="https://asilturkmen.com">asilturkmen.com</a>
+</p>
+
+<p align="center">
   <em>☕ This bot is free and open source. If it won you some skins, buy me a coffee — it really keeps the project alive!</em>
 </p>
 
@@ -51,23 +55,45 @@ If you've been searching for a **Keydrop bot**, a **Keydrop giveaways bot**, a *
 
 ---
 
-## 🚀 Quick Start
+## 🚀 How to Use (Step by Step)
 
-### 1. Download
+Four steps, about five minutes the first time. After that it's just **double-click → START**.
 
-Go to **[Releases](https://github.com/Asilturkmen/keydrop-giveawaysBOT/releases/latest)**, download the **Source code (zip)** and **extract it** (right click → *Extract All*).
+### Step 1: Download and extract
 
-### 2. Double-click `KeydropBot.bat`
+Go to **[Releases](https://github.com/Asilturkmen/keydrop-giveawaysBOT/releases/latest)** and download **Source code (zip)**. Right click the ZIP → **Extract All**, then open the extracted folder (there is a folder with the same name inside it). There you'll find **`KeydropBot.bat`**.
 
-The first time, it downloads everything the bot needs (about 250 MB, a few minutes) and adds a **Keydrop Bot** shortcut to your desktop. After that it opens in a second.
+![Step 1: download Source code (zip) from Releases, right click → Extract All, open the folder and find KeydropBot.bat](docs/step1-download.png)
+
+### Step 2: Double-click `KeydropBot.bat`
+
+The first time, it downloads everything the bot needs by itself (about 250 MB, a few minutes) and adds a **Keydrop Bot** shortcut to your desktop. No Python, no commands. From now on, just use that desktop shortcut; it opens in a second.
 
 > If Windows shows a blue **"Windows protected your PC"** box, click **More info → Run anyway**. The bot is open source; you can read every line in `src/`.
 
-### 3. Press **START**
+![Step 2: the first-time setup window downloads everything and adds a Keydrop Bot desktop shortcut](docs/step2-setup.png)
 
-A browser window opens on Keydrop. **The first time, log in with your Steam account in that window.** The bot detects the login by itself and starts. It remembers your session, so next time just press START.
+### Step 3: Press **START**
 
-That's it. Keep the bot's browser window open (you can minimize it). Press **STOP** any time.
+The Keydrop Bot app opens. Press the big **START** button; it's the only button you need. While the bot runs it turns into a red **STOP** button.
+
+![Step 3: press the big START button in the Keydrop Bot app](docs/step3-start.png)
+
+### Step 4: Log in with Steam (first time only)
+
+A browser window opens on Keydrop. Click **LOG IN WITH STEAM** and sign in. The app shows *Waiting for login…* and **continues by itself** as soon as you're logged in. Your session is remembered, so you won't need to log in again next time.
+
+Keep this browser window open while the bot runs (you can minimize it).
+
+![Step 4: click LOG IN WITH STEAM on Keydrop; the app waits and continues by itself](docs/step4-login.png)
+
+### ✅ Done: the bot is running
+
+The status says **Running** with a countdown to the next check. Every giveaway it joins shows up in green in the activity feed and in the **Joined** counter. Press **STOP** any time.
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="Keydrop Bot running: joined counter, last join time, next check countdown and the activity feed" width="380" />
+</p>
 
 ---
 
@@ -100,6 +126,10 @@ Open the **Settings** tab in the app. Your choices are remembered.
 - **Auto-join**: join automatically when you're eligible (on by default).
 - **Open the giveaway page**: open a new giveaway's page even when not auto-joining.
 - **DEBUG**: write `debug_payloads.json` for troubleshooting.
+
+<p align="center">
+  <img src="docs/settings.png" alt="Keydrop Bot settings tab: check interval slider, giveaway tiers, auto-join, open page and DEBUG switches" width="380" />
+</p>
 
 ---
 
@@ -178,6 +208,12 @@ Yes. Leave it running and it keeps monitoring Keydrop and joining new giveaways.
 ## 📜 Disclaimer
 
 This is an unofficial, community-made tool and is **not affiliated with Keydrop / key-drop.com**. Use it responsibly and at your own discretion, in line with Keydrop's terms of service.
+
+---
+
+## 👤 Author
+
+**Keydrop Bot** is built and maintained by **[Asil Türkmen](https://asilturkmen.com)**, a full-stack developer and software engineering student. See more of my projects and get in touch at **[asilturkmen.com](https://asilturkmen.com)**.
 
 ---
 
