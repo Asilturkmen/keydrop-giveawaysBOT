@@ -1,1 +1,3 @@
 playwright>=1.44
+customtkinter>=5.2,<6
+pillow>=10

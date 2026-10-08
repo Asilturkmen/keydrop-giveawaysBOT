@@ -5,6 +5,12 @@ keydrop_profile/
 # Raw data scraped from the site (contains steamIDs, usernames, etc.)
 debug_payloads.json
 
+# Your saved settings (interval, tiers, language)
+settings.json
+
+# Tools downloaded by KeydropBot.bat on the first run (uv)
+.tools/
+
 # --- Python / environment ---
 __pycache__/
 *.pyc

@@ -1,0 +1,6 @@
+# Windows batch files must keep CRLF line endings (labels/goto break with LF),
+# also in the GitHub "Source code (zip)" download.
+*.bat text eol=crlf
+
+*.ico binary
+*.png binary
