@@ -5,8 +5,11 @@ keydrop_profile/
 # Raw data scraped from the site (contains steamIDs, usernames, etc.)
 debug_payloads.json
 
-# Your saved settings (interval, tiers, language)
+# Your saved settings (interval, tiers, language, last login name)
 settings.json
+
+# Your Steam profile photo (shown on the account card)
+avatar.jpg
 
 # Tools downloaded by KeydropBot.bat on the first run (uv)
 .tools/

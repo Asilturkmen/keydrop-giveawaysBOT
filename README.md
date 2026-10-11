@@ -48,7 +48,7 @@ If you've been searching for a **Keydrop bot**, a **Keydrop giveaways bot**, a *
 | **Modern one-button app** | Big START / STOP button, account card, live status with countdown, session stats |
 | **Keydrop giveaways auto join** | Joins every giveaway you're eligible for and verifies the entry with Keydrop |
 | **Deposit safety** | Never deposits, never clicks deposit / extra-entry buttons; tells you if a deposit is missing |
-| **Automatic login detection** | Log in with Steam once; the bot notices by itself and remembers your session |
+| **Automatic login detection** | Log in with Steam once; the bot notices by itself, remembers your session and shows your Steam photo |
 | **Multiple giveaway tiers** | Amateur by default; Contender, Challenger and Champion optional |
 | **Auto-update** | Shows a banner when a new version is out; one click updates it |
 | **English & Turkish** | Follows your Windows language; switch any time (TR / EN) |
@@ -156,7 +156,7 @@ When a new version is released, the app shows a **"New version available"** bann
 - **`src/`**: the bot's code (`keydrop_ui.py`), its package list and icon
 - **`README.md`**: this guide
 
-Created while running (personal, **never pushed to GitHub**): `keydrop_profile/` (your browser session), `settings.json`, `debug_payloads.json`, `.tools/`.
+Created while running (personal, **never pushed to GitHub**): `keydrop_profile/` (your browser session), `settings.json`, `avatar.jpg` (your Steam photo for the account card), `debug_payloads.json`, `.tools/`.
 
 **Uninstall:** delete the folder and the desktop shortcut. The shared Python and browser downloads live in `%LOCALAPPDATA%\uv` and `%LOCALAPPDATA%\ms-playwright`; delete those too if nothing else uses them.
 

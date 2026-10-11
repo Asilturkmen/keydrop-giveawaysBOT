@@ -4,7 +4,7 @@ Keydrop Bot - watches Keydrop giveaways and joins them for you.
 
 Control everything from this window (dark, Keydrop-style UI built with CustomTkinter):
   - One big START / STOP button; the Steam login is detected automatically
-  - Account card with a "Log in" button (log in once; the session is kept)
+  - Account card with your Steam photo; a hidden browser checks the login when the app opens
   - Live status with countdown, session stats, an activity feed and a settings tab
   - TR / EN toggle; settings are remembered in settings.json
   - A banner offers a one-click update when a newer release is on GitHub
@@ -22,6 +22,7 @@ then python keydrop_ui.py
 
 import asyncio
 import ctypes
+import io
 import json
 import os
 import queue
@@ -37,7 +38,7 @@ from pathlib import Path
 import tkinter as tk
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageDraw
 from playwright.async_api import async_playwright
 
 __version__ = "1.1.0"
@@ -48,6 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent       # project folder (src/..)
 USER_DATA_DIR = ROOT / "keydrop_profile"           # browser profile = your Keydrop login
 DEBUG_FILE = ROOT / "debug_payloads.json"
 SETTINGS_FILE = ROOT / "settings.json"
+AVATAR_FILE = ROOT / "avatar.jpg"                  # your Steam profile photo (account card)
 LAUNCHER = ROOT / "KeydropBot.bat"
 ICON_FILE = Path(__file__).resolve().parent / "icon.ico"
 GIVEAWAYS_URL = "https://keydrop.com/tr/giveaways/list"
@@ -76,6 +78,8 @@ INIT_API_PART = "/apidata/init/index"
 JOIN_ATTEMPTS = 3
 # Seconds between login checks while waiting for the user to log in.
 LOGIN_POLL = 3
+# Max seconds for the hidden login check that runs when the app opens / the bot stops.
+LOGIN_CHECK_TIMEOUT = 25
 
 # Updates: the newest GitHub release replaces these files.
 GITHUB_REPO = "Asilturkmen/keydrop-giveawaysBOT"
@@ -123,7 +127,14 @@ TXT = {
     "acc_title_out":      {"en": "Not logged in", "tr": "Giriş yapılmadı"},
     "acc_sub_out":        {"en": "Log in with Steam in the browser window that opened.",
                            "tr": "Açılan tarayıcı penceresinde Steam ile giriş yap."},
+    "acc_sub_out_idle":   {"en": "Press Log in, then sign in with Steam in the window that opens.",
+                           "tr": "Giriş yap'a bas, açılan pencerede Steam ile giriş yap."},
+    "acc_sub_saved":      {"en": "Saved session · last checked {when}",
+                           "tr": "Kayıtlı oturum · son kontrol {when}"},
+    "acc_sub_verifying":  {"en": "Checking your session...", "tr": "Oturum kontrol ediliyor..."},
     "badge_in":           {"en": "●  Connected", "tr": "●  Bağlı"},
+    "badge_saved":        {"en": "●  Saved", "tr": "●  Kayıtlı"},
+    "today":              {"en": "today", "tr": "bugün"},
     "login":              {"en": "Log in", "tr": "Giriş yap"},
 
     # big button / status line / stats
@@ -474,9 +485,9 @@ def q_status(key):
     ui_queue.put(("status", key))
 
 
-def q_account(state, name=None):
-    """Account state for the UI: 'checking', 'in' (with Steam name) or 'out'."""
-    ui_queue.put(("account", (state, name)))
+def q_account(state, name=None, avatar=None):
+    """Account state for the UI: 'checking', 'in' (with Steam name + photo URL) or 'out'."""
+    ui_queue.put(("account", (state, name, avatar)))
 
 
 # --------------------------- UPDATES ------------------------------
@@ -510,6 +521,21 @@ def apply_update(tag):
         (ROOT / path).write_bytes(data)
 
 
+def fetch_avatar(url):
+    """Download the Steam profile photo for the account card (runs in a thread)."""
+    try:
+        if not str(url).startswith("https://"):
+            return
+        req = urllib.request.Request(url, headers={"User-Agent": "keydrop-bot"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = r.read(2_000_000)
+        Image.open(io.BytesIO(data)).verify()   # refuse a broken download
+        AVATAR_FILE.write_bytes(data)
+        ui_queue.put(("avatar", url))
+    except Exception:
+        pass
+
+
 # --------------------------- WORKER (async) ------------------------
 
 def install_chromium():
@@ -534,8 +560,8 @@ async def launch_browser(p):
 
 
 async def login_state(ctx):
-    """(True, steam name) / (False, None) from the site's init data; None if unknown now
-    (e.g. the user is on the Steam login page)."""
+    """(True, steam name, photo URL) / (False, None, None) from the site's init data;
+    None if unknown now (e.g. the user is on the Steam login page)."""
     page = next((pg for pg in ctx.pages if not pg.is_closed() and "keydrop.com" in pg.url), None)
     if page is None:
         return None
@@ -546,8 +572,8 @@ async def login_state(ctx):
     if not isinstance(res, dict):
         return None
     if res.get("status") is False:
-        return False, None
-    return True, res.get("userName")
+        return False, None, None
+    return True, res.get("userName"), res.get("avatar")
 
 
 async def session_main():
@@ -607,10 +633,10 @@ async def session_main():
         while not should_stop():
             state = await login_state(ctx)
             if state is not None:
-                ok, name = state
+                ok, name, avatar = state
                 if ok:
                     session["logged_in"] = True
-                    q_account("in", name)
+                    q_account("in", name, avatar)
                     q_log(t("log_logged_in", name=name or "?"))
                     return True
                 if not told:
@@ -829,6 +855,64 @@ async def session_main():
                 pass
 
 
+async def check_login():
+    """Ask Keydrop, in a hidden browser with the saved profile, whether we're logged in,
+    so the account card is right before START. Gives up quietly (offline, no browser yet)
+    and as soon as START needs the profile (stop_event). The browser is never abandoned
+    mid-launch: it would keep the profile locked and START couldn't open it."""
+    state = None
+    async with async_playwright() as p:
+        try:
+            # channel="chromium": the full browser in headless mode (KeydropBot.bat
+            # installs Chromium with --no-shell, so there's no separate headless build).
+            ctx = await p.chromium.launch_persistent_context(
+                str(USER_DATA_DIR), headless=True, channel="chromium",
+                args=["--disable-blink-features=AutomationControlled"])
+        except Exception:
+            return
+        deadline = time.time() + LOGIN_CHECK_TIMEOUT
+
+        def keep_waiting():
+            return not stop_event.is_set() and time.time() < deadline
+
+        nav = None
+        try:
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            # Load in the background so START doesn't have to wait for a slow page.
+            nav = asyncio.ensure_future(page.goto(GIVEAWAYS_URL, wait_until="domcontentloaded"))
+            while not nav.done() and keep_waiting():
+                await asyncio.sleep(0.2)
+            if nav.done() and nav.exception() is None:   # page loaded (not offline)
+                while state is None and keep_waiting():
+                    state = await login_state(ctx)
+                    if state is None:
+                        await asyncio.sleep(1)
+        except Exception:
+            pass
+        finally:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+            if nav is not None:   # a load cut short by close() ends with an error; collect it
+                await asyncio.gather(nav, return_exceptions=True)
+    if state:
+        ok, name, avatar = state
+        if ok:
+            q_account("in", name, avatar)
+        else:
+            q_account("out")
+
+
+def check_main():
+    try:
+        asyncio.run(check_login())
+    except Exception:
+        pass
+    finally:
+        ui_queue.put(("checked", None))
+
+
 def worker_main():
     try:
         asyncio.run(session_main())
@@ -864,8 +948,10 @@ STATUS_COLORS = {"st_ready": MUTED, "st_opening": WARN, "st_wait_login": WARN,
                  "st_logged_in": SUCCESS, "st_monitoring": SUCCESS,
                  "st_stopping": WARN, "st_stopped": MUTED}
 
+# "account": the last confirmed login ({"name", "avatar", "seen"}), shown while the hidden
+# login check runs and when Keydrop can't be reached.
 DEFAULT_SETTINGS = {"interval": 25, "tiers": ["amateur"], "auto_join": True,
-                    "open_page": True, "debug": False, "lang": None}
+                    "open_page": True, "debug": False, "lang": None, "account": None}
 
 
 def load_settings():
@@ -877,6 +963,30 @@ def load_settings():
     except Exception:
         pass
     return settings
+
+
+def load_avatar(size=48):
+    """The saved Steam profile photo cut into a circle, or None if there isn't one."""
+    try:
+        img = Image.open(AVATAR_FILE).convert("RGBA")
+        img = img.resize((size * 3, size * 3), Image.Resampling.LANCZOS)  # sharp on HiDPI
+    except Exception:
+        return None
+    mask = Image.new("L", (size * 12, size * 12), 0)   # drawn big, then shrunk: smooth edge
+    ImageDraw.Draw(mask).ellipse((0, 0, size * 12, size * 12), fill=255)
+    img.putalpha(mask.resize(img.size, Image.Resampling.LANCZOS))
+    return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+
+
+def _fmt_seen(ts):
+    """When the login was last confirmed: 'today 13:05', otherwise the date too."""
+    try:
+        d = datetime.fromtimestamp(float(ts))
+    except Exception:
+        return "?"
+    if d.date() == datetime.now().date():
+        return f"{t('today')} {d:%H:%M}"
+    return f"{d:%d.%m.%Y %H:%M}" if _LANG["v"] == "tr" else f"{d:%Y-%m-%d %H:%M}"
 
 
 def font(size, bold=False):
@@ -892,10 +1002,15 @@ class App:
 
         # state (kept as keys so texts follow language changes)
         self.status_key = "st_ready"
-        self.account = ("unknown", None)
+        if not self.remembered():
+            self.settings["account"] = None
+        # With a browser profile, the hidden login check starts right away (see start_check).
+        self.account = ("checking", None) if USER_DATA_DIR.exists() else ("unknown", None)
+        self.avatar_photo = load_avatar() if self.settings["account"] else None
         self.joined = 0
         self.last_join = None
-        self.running = False        # a browser session is open
+        self.checking = False       # the hidden login check is running
+        self.running = False        # a browser session is open (or waiting for the check)
         self.monitoring = False     # START was pressed for this session
         self.stopping = False
         self.closing = False
@@ -960,6 +1075,8 @@ class App:
                                    corner_radius=24, fg_color=CARD_2, text_color=TEXT,
                                    font=font(18, True))
         self.avatar.grid(row=0, column=0, rowspan=2, padx=14, pady=14)
+        # Steam photo: its own label, swapped with the letter one (a CTkLabel can't drop an image).
+        self.avatar_pic = ctk.CTkLabel(self.acc_card, text="", width=48, height=48)
         self.acc_name = ctk.CTkLabel(self.acc_card, text="", font=font(16, True),
                                      text_color=TEXT, anchor="w")
         self.acc_name.grid(row=0, column=1, sticky="sw", pady=(14, 0))
@@ -1086,6 +1203,7 @@ class App:
         root.after(150, self.poll_queue)
         root.after(700, self.tick)
         threading.Thread(target=check_update, daemon=True).start()
+        self.start_check()
 
     # --- texts / language ---
     def on_lang(self, value):
@@ -1105,7 +1223,6 @@ class App:
         if self.update_tag:
             self.update_lbl.configure(text=t("update_available", tag=self.update_tag))
         self.login_btn.configure(text=t("login"))
-        self.badge.configure(text=t("badge_in"))
         self.safety_lbl.configure(text=t("safety"))
         for cap, key in zip(self.stat_caps, ("stat_joined", "stat_last", "stat_tiers")):
             cap.configure(text=t(key))
@@ -1129,23 +1246,88 @@ class App:
             self.countdown_lbl.configure(text="")
 
     def set_account(self, state, name=None):
+        """Account card. 'in' = Keydrop confirmed the login (green badge); 'saved' = the
+        last known login when Keydrop couldn't be asked, e.g. offline (grey badge).
+        The photo shows only for these (and while a saved one is checked); a dropped
+        session ('out') removes it and brings back the Log in button."""
         self.account = (state, name)
+        saved = self.settings.get("account")
         if state == "in":
-            self.avatar.configure(text=(name or "?")[:1].upper(), fg_color=ACCENT,
-                                  text_color=ON_ACCENT)
+            sub, badge, color = t("acc_sub_in"), t("badge_in"), SUCCESS
+        elif state == "checking" and saved:
+            sub, badge, color = t("acc_sub_verifying"), t("badge_saved"), MUTED
+        elif state == "saved" and saved:
+            sub, badge, color = (t("acc_sub_saved", when=_fmt_seen(saved.get("seen"))),
+                                 t("badge_saved"), MUTED)
+        else:
+            badge = None
+        if badge:
+            name = name or (saved or {}).get("name")
+            self.show_avatar((name or "?")[:1].upper())
             self.acc_name.configure(text=name or t("acc_title_in"), text_color=TEXT)
-            self.acc_sub.configure(text=t("acc_sub_in"))
+            self.acc_sub.configure(text=sub)
+            self.badge.configure(text=badge, text_color=color)
             self.login_btn.grid_remove()
             self.badge.grid(row=0, column=2, rowspan=2, padx=14)
             return
         titles = {"checking": ("acc_title_checking", "acc_sub_checking"),
                   "out": ("acc_title_out", "acc_sub_out")}
         title, sub = titles.get(state, ("acc_title_unknown", "acc_sub_unknown"))
-        self.avatar.configure(text="?", fg_color=CARD_2, text_color=TEXT)
+        if state == "out" and not self.running:   # no browser open: point to Log in
+            sub = "acc_sub_out_idle"
+        self.show_avatar(None)
         self.acc_name.configure(text=t(title), text_color=DANGER if state == "out" else TEXT)
         self.acc_sub.configure(text=t(sub))
         self.badge.grid_remove()
-        self.login_btn.grid(row=0, column=2, rowspan=2, padx=14)
+        if state == "checking":     # don't offer Log in before Keydrop has answered
+            self.login_btn.grid_remove()
+        else:
+            self.login_btn.grid(row=0, column=2, rowspan=2, padx=14)
+
+    def show_avatar(self, letter):
+        """Steam photo if we have it, else the name's first letter; None = '?'."""
+        if letter and self.avatar_photo:
+            self.avatar.grid_remove()
+            self.avatar_pic.configure(image=self.avatar_photo)
+            self.avatar_pic.grid(row=0, column=0, rowspan=2, padx=14, pady=14)
+            return
+        self.avatar_pic.grid_remove()
+        if letter:
+            self.avatar.configure(text=letter, fg_color=ACCENT, text_color=ON_ACCENT)
+        else:
+            self.avatar.configure(text="?", fg_color=CARD_2, text_color=TEXT)
+        self.avatar.grid(row=0, column=0, rowspan=2, padx=14, pady=14)
+
+    # --- remembered login (name + photo) ---
+    def remembered(self):
+        """A saved login is only worth showing while the browser profile still exists."""
+        acc = self.settings.get("account")
+        return isinstance(acc, dict) and bool(acc.get("name")) and USER_DATA_DIR.exists()
+
+    def remember_account(self, name, avatar):
+        """Keydrop confirmed the login: keep name + photo for the next app start."""
+        old = self.settings.get("account") or {}
+        self.settings["account"] = {"name": name, "avatar": avatar, "seen": time.time()}
+        self.save_settings()
+        if not avatar:
+            self.drop_photo()
+        elif avatar != old.get("avatar") or not AVATAR_FILE.exists():
+            threading.Thread(target=fetch_avatar, args=(avatar,), daemon=True).start()
+        elif self.avatar_photo is None:
+            self.avatar_photo = load_avatar()
+
+    def forget_account(self):
+        """The session dropped: forget the saved name and photo."""
+        self.settings["account"] = None
+        self.save_settings()
+        self.drop_photo()
+
+    def drop_photo(self):
+        self.avatar_photo = None
+        try:
+            AVATAR_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def refresh_controls(self):
         """Big button: START (lime) / STOP (red) / Stopping (grey)."""
@@ -1216,6 +1398,7 @@ class App:
             "open_page": self.openpage_var.get(),
             "debug": self.debug_var.get(),
             "lang": _LANG["v"],
+            "account": self.settings.get("account"),
         }
         try:
             SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -1223,13 +1406,27 @@ class App:
             pass
 
     # --- actions ---
+    def start_check(self):
+        """Hidden login check (app opened / bot stopped), so the card shows the truth."""
+        if self.checking or self.running or not USER_DATA_DIR.exists():
+            return
+        self.checking = True
+        stop_event.clear()
+        threading.Thread(target=check_main, daemon=True).start()
+
     def start_session(self):
+        self.running = True
+        self.set_status("st_opening")
+        if self.checking:   # the check still has the profile open: end it, "checked" goes on
+            stop_event.set()
+            return
+        self.launch_worker()
+
+    def launch_worker(self):
         global worker_thread
         stop_event.clear()
         worker_thread = threading.Thread(target=worker_main, daemon=True)
         worker_thread.start()
-        self.running = True
-        self.set_status("st_opening")
 
     def on_big(self):
         if self.stopping:
@@ -1272,12 +1469,15 @@ class App:
 
     def on_close(self):
         self.save_settings()
-        if not self.running:
+        if not (self.running or self.checking):
             self.destroy_once()
             return
-        # Let the worker close the browser cleanly (so the login is saved), max 15 s.
+        # Let the worker / check close the browser cleanly (so the login is saved), max 15 s.
         self.closing = True
-        self.on_stop()
+        if self.running:
+            self.on_stop()
+        else:
+            stop_event.set()
         self.root.after(15000, self.destroy_once)
 
     def destroy_once(self):
@@ -1319,7 +1519,17 @@ class App:
                 elif kind == "status":
                     self.set_status(payload)
                 elif kind == "account":
-                    self.set_account(*payload)
+                    state, name, avatar = payload
+                    if state == "in":
+                        self.remember_account(name, avatar)
+                    elif state == "out":
+                        self.forget_account()
+                    self.set_account(state, name)
+                elif kind == "avatar":
+                    # Photo downloaded; show it if it still belongs to the saved login.
+                    if (self.settings.get("account") or {}).get("avatar") == payload:
+                        self.avatar_photo = load_avatar()
+                        self.set_account(*self.account)
                 elif kind == "next_check":
                     self.next_check_at = time.time() + payload
                 elif kind == "update":
@@ -1334,17 +1544,34 @@ class App:
                 elif kind == "update_fail":
                     self.append(t("log_update_fail", e=payload), "alert")
                     self.update_btn.configure(state="normal")
+                elif kind == "checked":
+                    # The hidden login check has ended and released the profile.
+                    self.checking = False
+                    if self.account[0] == "checking":   # no answer (offline...): last known
+                        self.set_account("saved" if self.remembered() else "unknown")
+                    if self.closing:
+                        self.destroy_once()
+                        return
+                    if self.running:       # START / Log in was pressed during the check
+                        if self.stopping:  # ...and STOP too, before the browser opened
+                            ui_queue.put(("stopped", None))
+                        else:
+                            self.launch_worker()
                 elif kind == "stopped":
                     # The worker has fully exited (Stop, closed browser, or an error).
                     self.running = self.monitoring = self.stopping = False
                     self.next_check_at = None
                     self.set_status("st_stopped")
                     if self.account[0] == "checking":
-                        self.set_account("unknown")
+                        self.set_account("saved" if self.remembered() else "unknown")
+                    else:
+                        self.set_account(*self.account)   # 'out' text: point to Log in
                     self.refresh_controls()
                     if self.closing:
                         self.destroy_once()
                         return
+                    # Browser closed: check again (e.g. the user logged out in it).
+                    self.start_check()
         except queue.Empty:
             pass
         self.root.after(150, self.poll_queue)
