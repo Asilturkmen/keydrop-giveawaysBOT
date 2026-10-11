@@ -8,6 +8,7 @@ Control everything from this window (dark, Keydrop-style UI built with CustomTki
   - Live status with countdown, session stats, an activity feed and a settings tab
   - TR / EN toggle; settings are remembered in settings.json
   - A banner offers a one-click update when a newer release is on GitHub
+  - Anonymous usage stats (random install id, version, join count; can be turned off)
 
 When a new active giveaway is found, a red line appears in the log and the detail
 page opens. It auto-joins only when Keydrop says the account is eligible (the
@@ -32,6 +33,7 @@ import sys
 import threading
 import time
 import urllib.request
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -41,7 +43,7 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw
 from playwright.async_api import async_playwright
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # --------------------------- CONSTANTS ------------------------------
 
@@ -86,6 +88,13 @@ GITHUB_REPO = "Asilturkmen/keydrop-giveawaysBOT"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RAW_FILE_URL = "https://raw.githubusercontent.com/" + GITHUB_REPO + "/{tag}/{path}"
 UPDATE_FILES = ("src/keydrop_ui.py", "src/requirements.txt")
+
+# Anonymous usage stats (README → Privacy): a random install id, the app version, the language
+# and how many giveaways were joined. Nothing else; can be turned off in Settings.
+# The server's code is in stats-worker/.
+STATS_URL = "https://keydrop-stats.keydrop-stats.workers.dev"
+STATS_EVERY = 3 * 3600   # while the bot runs, ping again this often (seconds)
+STATS_MAX_JOINS = 50     # joins sent per ping (the server counts no more); the rest go next time
 
 # Runs inside the Keydrop tab, so it has the browser's cookies (and gets past Cloudflare).
 _FETCH_JSON_JS = """async (url) => {
@@ -161,8 +170,15 @@ TXT = {
                      "tr": "Otomatik katıl (yalnızca şart sağlanmışsa, asla para yatırmaz)"},
     "debug":        {"en": "DEBUG (write debug_payloads.json)",
                      "tr": "DEBUG (debug_payloads.json yaz)"},
+    "stats":        {"en": "Anonymous usage stats", "tr": "Anonim kullanım istatistikleri"},
+    "stats_note":   {"en": "Sends only a random ID, the app version and how many giveaways were "
+                           "joined. Never your Steam or Keydrop data.",
+                     "tr": "Yalnızca rastgele bir kimlik, uygulama sürümü ve katılınan çekiliş "
+                           "sayısı gönderilir. Steam veya Keydrop bilgilerin asla gönderilmez."},
     "set_note":     {"en": "Changes apply the next time you press START.",
                      "tr": "Değişiklikler bir sonraki BAŞLAT'ta geçerli olur."},
+    "comm_line":    {"en": "{users} users this week  ·  {joins} giveaways joined by all bots",
+                     "tr": "Bu hafta {users} kullanıcı  ·  tüm botlar {joins} çekilişe katıldı"},
     "clear_log":    {"en": "Clear", "tr": "Temizle"},
     "update_available": {"en": "New version available: {tag}", "tr": "Yeni sürüm var: {tag}"},
     "update_btn":   {"en": "Update", "tr": "Güncelle"},
@@ -261,6 +277,12 @@ TXT = {
     "log_update_done": {"en": "Updated to {tag}. Restarting...",
                         "tr": "{tag} sürümüne güncellendi. Yeniden başlatılıyor..."},
     "log_update_fail": {"en": "Update failed: {e}", "tr": "Güncelleme başarısız: {e}"},
+    "log_stats_on": {"en": "Anonymous usage stats are on: only a random ID, the app version and the "
+                           "number of joined giveaways are sent (never your Steam or Keydrop data). "
+                           "You can turn this off in Settings.",
+                     "tr": "Anonim kullanım istatistikleri açık: yalnızca rastgele bir kimlik, uygulama "
+                           "sürümü ve katılınan çekiliş sayısı gönderilir (Steam veya Keydrop "
+                           "bilgilerin asla gönderilmez). Ayarlar'dan kapatabilirsin."},
 
     # summarize() field labels
     "sum_tier":         {"en": "tier", "tr": "seviye"},
@@ -519,6 +541,22 @@ def apply_update(tag):
     compile(new["src/keydrop_ui.py"], "keydrop_ui.py", "exec")   # refuse a broken download
     for path, data in new.items():
         (ROOT / path).write_bytes(data)
+
+
+def send_ping(install_id, joins):
+    """Anonymous usage ping (runs in a thread). The reply carries the community numbers
+    and how many of the `joins` the server counted."""
+    body = json.dumps({"id": install_id, "v": __version__, "lang": _LANG["v"],
+                       "joins": joins}).encode()
+    try:
+        req = urllib.request.Request(STATS_URL + "/ping", data=body,
+                                     headers={"User-Agent": "keydrop-bot",
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            reply = json.load(r)
+    except Exception:
+        reply = None
+    ui_queue.put(("stats", reply))
 
 
 def fetch_avatar(url):
@@ -950,8 +988,11 @@ STATUS_COLORS = {"st_ready": MUTED, "st_opening": WARN, "st_wait_login": WARN,
 
 # "account": the last confirmed login ({"name", "avatar", "seen"}), shown while the hidden
 # login check runs and when Keydrop can't be reached.
+# "stats": anonymous usage stats on/off; "install_id": the random id they use;
+# "pending_joins": joins not sent to the stats server yet.
 DEFAULT_SETTINGS = {"interval": 25, "tiers": ["amateur"], "auto_join": True,
-                    "open_page": True, "debug": False, "lang": None, "account": None}
+                    "open_page": True, "debug": False, "lang": None, "account": None,
+                    "stats": True, "install_id": None, "pending_joins": 0}
 
 
 def load_settings():
@@ -1017,6 +1058,8 @@ class App:
         self.update_tag = None
         self.next_check_at = None
         self.pulse = False
+        self.pinging = False        # a usage-stats ping is on its way
+        self.last_ping = 0.0
 
         # As tall as the screen comfortably allows (small laptops: 600, big screens: 760).
         try:
@@ -1184,17 +1227,30 @@ class App:
         self.autojoin_var = tk.BooleanVar(value=bool(self.settings.get("auto_join", True)))
         self.openpage_var = tk.BooleanVar(value=bool(self.settings.get("open_page", True)))
         self.debug_var = tk.BooleanVar(value=bool(self.settings.get("debug", False)))
+        self.stats_var = tk.BooleanVar(value=bool(self.settings.get("stats", True)))
         self.switches = {}
         for row, (key, var) in enumerate((("auto_join", self.autojoin_var),
                                           ("open_page", self.openpage_var),
-                                          ("debug", self.debug_var)), start=5):
+                                          ("debug", self.debug_var),
+                                          ("stats", self.stats_var)), start=5):
             sw = ctk.CTkSwitch(sett, text="", variable=var, font=font(13), text_color=TEXT,
                                fg_color=CARD_2, progress_color=ACCENT, button_color=TEXT,
                                button_hover_color="#ffffff")
             sw.grid(row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(10 if row == 5 else 4, 4))
             self.switches[key] = sw
+        self.switches["stats"].configure(command=self.on_stats_switch)   # applies right away
+        self.stats_note = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED,
+                                       justify="left", anchor="w", wraplength=420)
+        self.stats_note.grid(row=9, column=0, columnspan=2, sticky="w", padx=(52, 4))
         self.note_lbl = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED)
-        self.note_lbl.grid(row=8, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 4))
+        self.note_lbl.grid(row=10, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 4))
+
+        # --- community line (filled by the usage-stats reply; hidden until then) ---
+        self.comm = ctk.CTkFrame(body, fg_color="transparent")
+        ctk.CTkLabel(self.comm, text="●", font=font(12), text_color=SUCCESS).pack(side="left")
+        self.comm_lbl = ctk.CTkLabel(self.comm, text="", font=font(12), text_color=MUTED)
+        self.comm_lbl.pack(side="left", padx=(6, 0))
+        self.community = None
 
         self.retranslate()
         self.append(t("log_ready"))
@@ -1203,6 +1259,7 @@ class App:
         root.after(150, self.poll_queue)
         root.after(700, self.tick)
         threading.Thread(target=check_update, daemon=True).start()
+        self.ping()
         self.start_check()
 
     # --- texts / language ---
@@ -1232,7 +1289,9 @@ class App:
         self.tiers_lbl.configure(text=t("set_tiers"))
         for key, sw in self.switches.items():
             sw.configure(text=t(key))
+        self.stats_note.configure(text=t("stats_note"))
         self.note_lbl.configure(text=t("set_note"))
+        self.show_community()
         self.set_status(self.status_key)
         self.set_account(*self.account)
         self.update_stats()
@@ -1360,6 +1419,8 @@ class App:
                 left = int(self.next_check_at - time.time() + 0.999)
                 self.countdown_lbl.configure(
                     text=t("next_check", s=left) if left > 0 else t("checking_now"))
+        if self.monitoring and time.time() - self.last_ping >= STATS_EVERY:
+            self.ping()
         self.root.after(700, self.tick)
 
     # --- feed ---
@@ -1399,11 +1460,56 @@ class App:
             "debug": self.debug_var.get(),
             "lang": _LANG["v"],
             "account": self.settings.get("account"),
+            "stats": self.stats_var.get(),
+            "install_id": self.settings.get("install_id"),
+            "pending_joins": self.pending_joins(),
         }
         try:
             SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:
             pass
+
+    # --- anonymous usage stats ---
+    def pending_joins(self):
+        n = self.settings.get("pending_joins")
+        return n if isinstance(n, int) and n > 0 else 0
+
+    def ping(self):
+        """Tell the stats server this install is in use (only if allowed in Settings)."""
+        if self.pinging or not self.stats_var.get():
+            return
+        if not re.fullmatch(r"[0-9a-f]{32}", str(self.settings.get("install_id"))):
+            self.settings["install_id"] = uuid.uuid4().hex   # random, not tied to anyone
+            self.save_settings()
+            self.append(t("log_stats_on"))
+        self.pinging = True
+        self.last_ping = time.time()
+        joins = min(self.pending_joins(), STATS_MAX_JOINS)
+        threading.Thread(target=send_ping, args=(self.settings["install_id"], joins),
+                         daemon=True).start()
+
+    def on_stats_switch(self):
+        if self.stats_var.get():
+            self.ping()
+        else:
+            self.settings["pending_joins"] = 0
+        self.save_settings()
+        self.show_community()
+
+    def show_community(self):
+        """'N users this week · M giveaways joined by all bots' under the tabs."""
+        stats = self.community
+        if not (self.stats_var.get() and isinstance(stats, dict)):
+            self.comm.pack_forget()
+            return
+        try:
+            users, joins = int(stats.get("active_7d", 0)), int(stats.get("joins", 0))
+        except (TypeError, ValueError):
+            return
+        sep = "." if _LANG["v"] == "tr" else ","
+        self.comm_lbl.configure(text=t("comm_line", users=f"{users:,}".replace(",", sep),
+                                       joins=f"{joins:,}".replace(",", sep)))
+        self.comm.pack(pady=(8, 0))
 
     # --- actions ---
     def start_check(self):
@@ -1516,6 +1622,9 @@ class App:
                     self.joined += 1
                     self.last_join = datetime.now().strftime("%H:%M")
                     self.update_stats()
+                    if self.stats_var.get():   # counted with the next usage-stats ping
+                        self.settings["pending_joins"] = self.pending_joins() + 1
+                        self.save_settings()
                 elif kind == "status":
                     self.set_status(payload)
                 elif kind == "account":
@@ -1530,6 +1639,16 @@ class App:
                     if (self.settings.get("account") or {}).get("avatar") == payload:
                         self.avatar_photo = load_avatar()
                         self.set_account(*self.account)
+                elif kind == "stats":
+                    self.pinging = False
+                    if isinstance(payload, dict) and payload.get("ok"):
+                        sent = payload.get("joins")
+                        sent = sent if isinstance(sent, int) and sent > 0 else 0
+                        self.settings["pending_joins"] = max(0, self.pending_joins() - sent)
+                        self.save_settings()
+                        if isinstance(payload.get("stats"), dict):
+                            self.community = payload["stats"]
+                            self.show_community()
                 elif kind == "next_check":
                     self.next_check_at = time.time() + payload
                 elif kind == "update":

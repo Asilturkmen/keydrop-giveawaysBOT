@@ -1,0 +1,54 @@
+# Builds KeydropBot.zip (the download for users) and attaches it to the release.
+# GitHub counts downloads of attached files (not of "Source code (zip)"), which feeds
+# the download numbers in the README.
+#
+#   - push a tag like V1.2.0  -> creates the release (notes = the tag's message) + zip
+#   - publish a release on the website -> attaches the zip to it
+#   - Actions tab -> Run workflow -> rebuilds the zip of any existing tag
+name: Release zip
+
+on:
+  push:
+    tags: ["V*", "v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. V1.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-zip-${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}
+
+jobs:
+  zip:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build KeydropBot.zip
+        run: |
+          git fetch --force --tags origin   # keep annotated tag messages (release notes)
+          # Files at the top of the zip: Windows' "Extract All" makes one KeydropBot folder
+          # with KeydropBot.bat right inside. export-ignore (.gitattributes) leaves out docs etc.
+          git archive --worktree-attributes --format=zip -o KeydropBot.zip "refs/tags/$TAG"
+          unzip -l KeydropBot.zip
+
+      - name: Attach to the release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" KeydropBot.zip --clobber
+          else
+            git tag -l --format='%(contents)' "$TAG" > notes.md
+            gh release create "$TAG" KeydropBot.zip --verify-tag --title "Keydrop Bot $TAG" \
+              --notes-file notes.md
+          fi

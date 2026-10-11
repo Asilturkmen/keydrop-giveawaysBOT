@@ -4,3 +4,9 @@
 
 *.ico binary
 *.png binary
+
+# Not needed to run the bot: left out of KeydropBot.zip (and GitHub's source archives).
+.github/ export-ignore
+docs/ export-ignore
+stats-worker/ export-ignore
+.gitattributes export-ignore

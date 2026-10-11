@@ -1,0 +1,16 @@
+{
+  // Keydrop Bot anonymous usage stats. Deploy: npm install, then npm run deploy
+  "name": "keydrop-stats",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  // No request logs: nothing about the people who use the bot is kept (not even IPs).
+  "observability": { "enabled": false },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "keydrop-stats",
+      "database_id": "bb2f7f39-01c7-48e9-be34-81e7337000ee"
+    }
+  ]
+}

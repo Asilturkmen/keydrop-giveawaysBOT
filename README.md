@@ -3,6 +3,13 @@
 > **Keydrop Bot** is a lightweight **Keydrop giveaways bot** that watches [Keydrop](https://key-drop.com) giveaways and **auto-joins them for you** whenever your entry is free. A simple, safe, open-source **giveaways bot** with a modern one-button app, so you never miss a Keydrop giveaway again. **It never deposits money.**
 
 <p align="center">
+  <a href="https://github.com/Asilturkmen/keydrop-giveawaysBOT/releases/latest"><img src="https://img.shields.io/github/downloads/Asilturkmen/keydrop-giveawaysBOT/total?label=downloads&color=c8f25f&style=for-the-badge&labelColor=181b22" alt="Downloads" /></a>
+  <a href="#-live-stats"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fkeydrop-stats.keydrop-stats.workers.dev%2Fstats&query=%24.text.active_7d&label=weekly%20users&color=c8f25f&cacheSeconds=600&style=for-the-badge&labelColor=181b22" alt="Weekly users" /></a>
+  <a href="#-live-stats"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fkeydrop-stats.keydrop-stats.workers.dev%2Fstats&query=%24.text.joins&label=giveaways%20joined&color=c8f25f&cacheSeconds=600&style=for-the-badge&labelColor=181b22" alt="Giveaways joined" /></a>
+  <a href="https://github.com/Asilturkmen/keydrop-giveawaysBOT/releases/latest"><img src="https://img.shields.io/github/v/release/Asilturkmen/keydrop-giveawaysBOT?label=latest&color=2a2f3a&style=for-the-badge&labelColor=181b22" alt="Latest release" /></a>
+</p>
+
+<p align="center">
   <strong>keydrop bot</strong> · <strong>keydrop giveaways bot</strong> · <strong>keydrop auto join</strong> · <strong>giveaways bot</strong> · <strong>keydrop giveaway joiner</strong> · <strong>keydrop free skins bot</strong>
 </p>
 
@@ -40,6 +47,21 @@ If you've been searching for a **Keydrop bot**, a **Keydrop giveaways bot**, a *
 
 ---
 
+## 📊 Live stats
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://keydrop-stats.keydrop-stats.workers.dev/card.svg?theme=dark" />
+    <img src="https://keydrop-stats.keydrop-stats.workers.dev/card.svg?theme=light" width="840" alt="Keydrop Bot live stats: downloads, installs, weekly users and giveaways joined by everyone using the bot" />
+  </picture>
+</p>
+
+<p align="center">
+  <sub>Real numbers from everyone using Keydrop Bot, refreshed every few minutes. Counted anonymously, see <a href="#-security--privacy">Security &amp; Privacy</a>.</sub>
+</p>
+
+---
+
 ## ✨ Features
 
 | Feature | Description |
@@ -52,6 +74,7 @@ If you've been searching for a **Keydrop bot**, a **Keydrop giveaways bot**, a *
 | **Multiple giveaway tiers** | Amateur by default; Contender, Challenger and Champion optional |
 | **Auto-update** | Shows a banner when a new version is out; one click updates it |
 | **English & Turkish** | Follows your Windows language; switch any time (TR / EN) |
+| **Live community stats** | See how many people use the bot and how many giveaways it joined, in the app and above (anonymous, can be turned off) |
 
 ---
 
@@ -61,9 +84,13 @@ Four steps, about five minutes the first time. After that it's just **double-cli
 
 ### Step 1: Download and extract
 
-Go to **[Releases](https://github.com/Asilturkmen/keydrop-giveawaysBOT/releases/latest)** and download **Source code (zip)**. Right click the ZIP → **Extract All**, then open the extracted folder (there is a folder with the same name inside it). There you'll find **`KeydropBot.bat`**.
+<p align="center">
+  <a href="https://github.com/Asilturkmen/keydrop-giveawaysBOT/releases/latest/download/KeydropBot.zip"><img src="https://img.shields.io/badge/download-KeydropBot.zip-c8f25f?style=for-the-badge&labelColor=181b22" alt="Download KeydropBot.zip" height="36" /></a>
+</p>
 
-![Step 1: download Source code (zip) from Releases, right click → Extract All, open the folder and find KeydropBot.bat](docs/step1-download.png)
+Download **[KeydropBot.zip](https://github.com/Asilturkmen/keydrop-giveawaysBOT/releases/latest/download/KeydropBot.zip)** (it's also under *Assets* on the [latest release](https://github.com/Asilturkmen/keydrop-giveawaysBOT/releases/latest)). Right click the ZIP → **Extract All**, then open the extracted **KeydropBot** folder. There you'll find **`KeydropBot.bat`**.
+
+![Step 1: download KeydropBot.zip, right click → Extract All, open the KeydropBot folder and find KeydropBot.bat](docs/step1-download.png)
 
 ### Step 2: Double-click `KeydropBot.bat`
 
@@ -126,6 +153,7 @@ Open the **Settings** tab in the app. Your choices are remembered.
 - **Auto-join**: join automatically when you're eligible (on by default).
 - **Open the giveaway page**: open a new giveaway's page even when not auto-joining.
 - **DEBUG**: write `debug_payloads.json` for troubleshooting.
+- **Anonymous usage stats**: on by default; feeds the live numbers above. Sends only a random ID, the app version, the language and the join count ([details](#-security--privacy)).
 
 <p align="center">
   <img src="docs/settings.png" alt="Keydrop Bot settings tab: check interval slider, giveaway tiers, auto-join, open page and DEBUG switches" width="380" />
@@ -146,7 +174,7 @@ Open the **Settings** tab in the app. Your choices are remembered.
 
 When a new version is released, the app shows a **"New version available"** banner. Stop the bot and click **Update**; it updates and restarts by itself.
 
-**Coming from v1.0.x?** Download the new ZIP once. To keep your Keydrop login, copy the old `keydrop_profile` folder into the new folder.
+**Coming from v1.0.x?** Download **KeydropBot.zip** once. To keep your Keydrop login, copy the old `keydrop_profile` folder into the new folder.
 
 ---
 
@@ -165,6 +193,22 @@ Created while running (personal, **never pushed to GitHub**): `keydrop_profile/`
 ## 🔒 Security & Privacy
 
 Your **Steam session data is never sent anywhere**. This **Keydrop bot** only uses the browser session you opened yourself, on your own machine. It **never deposits money** and never clicks deposit or extra-entry buttons. It's open source: read the code in `src/` and see exactly what it does.
+
+### Anonymous usage stats
+
+The [live stats](#-live-stats) come from a tiny anonymous ping the app sends when it opens and every 3 hours while the bot runs. This is **everything** it sends:
+
+| What | Example |
+|------|---------|
+| A random install ID, made up by the app on its first start | `7aeeb6e9bab44454afe28c471a1b2f97` |
+| The app version | `1.2.0` |
+| The app language | `en` |
+| Giveaways joined since the last ping | `3` |
+
+- **Never sent:** your Steam or Keydrop account, name, Steam ID, photo, cookies, balance, or anything from the browser.
+- **Not stored:** your IP address. Cloudflare, which runs the stats server, only adds your country (for example `TR`).
+- **Turn it off:** Settings → **Anonymous usage stats**. Then nothing is sent at all.
+- **Check it yourself:** the app side is `send_ping` in [`src/keydrop_ui.py`](src/keydrop_ui.py); the server is in [`stats-worker/`](stats-worker/src/index.js). Day-by-day activity is deleted after 60 days.
 
 ---
 
@@ -193,6 +237,9 @@ No. Just double-click `KeydropBot.bat`.
 
 **Is the Keydrop auto join bot safe?**
 It never sends your Steam credentials anywhere; it only uses your own local browser session.
+
+**Does the bot collect any data?**
+Only anonymous usage stats (a random ID, the app version, the language and the number of joined giveaways) for the live numbers in this README. Never any account data. You can turn it off in Settings; see [Security & Privacy](#-security--privacy).
 
 **Can it run 24/7 as a giveaways bot?**
 Yes. Leave it running and it keeps monitoring Keydrop and joining new giveaways.

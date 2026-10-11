@@ -1,0 +1,12 @@
+{
+  "name": "keydrop-stats",
+  "private": true,
+  "description": "Keydrop Bot anonymous usage stats (Cloudflare Worker + D1)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
