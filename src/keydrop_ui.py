@@ -34,6 +34,7 @@ import threading
 import time
 import urllib.request
 import uuid
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -88,6 +89,7 @@ GITHUB_REPO = "Asilturkmen/keydrop-giveawaysBOT"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RAW_FILE_URL = "https://raw.githubusercontent.com/" + GITHUB_REPO + "/{tag}/{path}"
 UPDATE_FILES = ("src/keydrop_ui.py", "src/requirements.txt")
+CREATOR_URL = "https://asilturkmen.com"   # the credit line at the bottom of the window
 
 # Anonymous usage stats (README → Privacy): a random install id, the app version, the language
 # and how many giveaways were joined. Nothing else; can be turned off in Settings.
@@ -187,6 +189,7 @@ TXT = {
     "clear_log":    {"en": "Clear", "tr": "Temizle"},
     "update_available": {"en": "New version available: {tag}", "tr": "Yeni sürüm var: {tag}"},
     "update_btn":   {"en": "Update", "tr": "Güncelle"},
+    "credit":       {"en": "Made by asilturkmen.com", "tr": "Yapımcı: asilturkmen.com"},
 
     # statuses (single live field)
     "st_ready":      {"en": "Ready", "tr": "Hazır"},
@@ -1253,6 +1256,13 @@ class App:
             self.stat_vals.append(val)
             self.stat_caps.append(cap)
 
+        # --- creator credit (packed before the tabs so it keeps its place at the bottom) ---
+        self.credit = ctk.CTkLabel(body, text="", font=font(11), text_color=MUTED, cursor="hand2")
+        self.credit.pack(side="bottom", pady=(8, 0))
+        self.credit.bind("<Button-1>", lambda _: webbrowser.open(CREATOR_URL))
+        self.credit.bind("<Enter>", lambda _: self.credit.configure(text_color=ACCENT))
+        self.credit.bind("<Leave>", lambda _: self.credit.configure(text_color=MUTED))
+
         # --- tabs: activity feed / settings ---
         self.tabs = ctk.CTkTabview(
             body, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER,
@@ -1386,6 +1396,7 @@ class App:
             sw.configure(text=t(key))
         self.stats_note.configure(text=t("stats_note"))
         self.note_lbl.configure(text=t("set_note"))
+        self.credit.configure(text=t("credit"))
         self.show_community()
         self.set_status(self.status_key)
         self.set_account(*self.account)
