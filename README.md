@@ -166,6 +166,7 @@ Open the **Settings** tab in the app. Your choices are remembered.
 
 - **"Not eligible … missing"**: Keydrop wants a recent deposit (see the table above). The bot never deposits for you.
 - **"Your Keydrop session ended"**: log in again with Steam in the bot's browser window; the bot continues by itself.
+- **"Locked until … (Keydrop's daily join limit)"**: Keydrop allows only a limited number of Amateur joins per day (about 60, so roughly 3 hours of the bot running) and then shows a countdown until 00:00 UTC (03:00 in Turkey). The bot skips a locked tier, and stops by itself when every tier you watch is locked. Press START again after the lock ends.
 - **"List didn't load" / "No records captured"**: turn on **DEBUG**, run the bot once and send the `debug_payloads.json` file from the bot's folder with your issue. It contains your Steam ID and username, so share it privately or remove them first.
 - **Setup failed**: check your internet connection and run `KeydropBot.bat` again; it continues where it stopped.
 

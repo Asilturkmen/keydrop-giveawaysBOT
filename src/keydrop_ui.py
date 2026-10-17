@@ -146,6 +146,7 @@ TXT = {
     "badge_in":           {"en": "●  Connected", "tr": "●  Bağlı"},
     "badge_saved":        {"en": "●  Saved", "tr": "●  Kayıtlı"},
     "today":              {"en": "today", "tr": "bugün"},
+    "tomorrow":           {"en": "tomorrow", "tr": "yarın"},
     "login":              {"en": "Log in", "tr": "Giriş yap"},
 
     # big button / status line / stats
@@ -255,6 +256,14 @@ TXT = {
                             "bir sonraki turda tekrar denenecek."},
     "log_join_giveup": {"en": "Could not join after {n} attempts; skipping this giveaway.",
                         "tr": "{n} denemede katılınamadı; bu çekiliş atlanıyor."},
+    "log_tier_blocked": {"en": "{tier} is locked until {until} (Keydrop's daily join limit); "
+                               "skipping this tier until then.",
+                         "tr": "{tier} seviyesi {until}'e kadar kilitli (Keydrop'un günlük katılım "
+                               "limiti); o saate kadar bu seviye atlanıyor."},
+    "log_all_blocked": {"en": "Keydrop's daily join limit is reached for every watched tier, so the "
+                              "bot stopped. The lock ends at {until}; press START after that.",
+                        "tr": "İzlenen tüm seviyelerde Keydrop'un günlük katılım limiti doldu, bot "
+                              "durduruldu. Kilit {until}'te biter; o saatten sonra BAŞLAT'a bas."},
     "log_already_joined": {"en": "Already joined this giveaway (entries: {n}).",
                            "tr": "Bu çekilişe zaten katılmışsın (giriş: {n})."},
     "log_not_eligible": {"en": "Not eligible: Keydrop requires a {req} {cur} deposit within your "
@@ -362,6 +371,17 @@ def _fmt_deadline(ms):
         return f"{h}h {m}m" if h else f"{m}m {s}s"
     except Exception:
         return str(ms)
+
+
+def _fmt_clock(ts):
+    """A moment for the log: '03:00', 'tomorrow 03:00', otherwise with the date."""
+    d = datetime.fromtimestamp(ts)
+    days = (d.date() - datetime.now().date()).days
+    if days == 0:
+        return f"{d:%H:%M}"
+    if days == 1:
+        return f"{t('tomorrow')} {d:%H:%M}"
+    return f"{d:%d.%m.%Y %H:%M}" if _LANG["v"] == "tr" else f"{d:%Y-%m-%d %H:%M}"
 
 
 def summarize(data):
@@ -739,6 +759,17 @@ async def session_main():
     done = set()       # giveaways finished with (joined / not eligible / gave up / just opened)
     joined_ids = set() # giveaways Keydrop confirmed we're in
     attempts = {}      # giveaway id -> failed join attempts
+    # tier -> blockedUntil (ms). Keydrop locks a tier after its daily join limit
+    # (amateur: 60 a day) until 00:00 UTC; the site then shows a countdown, no join button.
+    blocked = {}
+
+    def tier_blocked(tier):
+        until = blocked.get(tier)
+        return isinstance(until, (int, float)) and until / 1000 > time.time()
+
+    def lock_end(until_ms):
+        """When a lock ends, for the log (Keydrop says 23:59:59 UTC, shown as the next minute)."""
+        return _fmt_clock(-(-until_ms // 60000) * 60)
 
     def failed_attempt(gid, key):
         attempts[gid] = attempts.get(gid, 0) + 1
@@ -759,6 +790,13 @@ async def session_main():
             done.add(gid)
             joined_ids.add(gid)
             q_log(t("log_already_joined", n=info.get("myJoinCount", "?")))
+            return
+        until = info.get("blockedUntil")
+        if isinstance(until, (int, float)) and until / 1000 > time.time():
+            tier = str(info.get("frequency") or "").strip().lower()
+            blocked[tier] = until
+            done.add(gid)
+            q_alert(t("log_tier_blocked", tier=tier.upper(), until=lock_end(until)))
             return
         missing = info.get("depositAmountMissing")
         if not isinstance(missing, (int, float)) or missing > 0:
@@ -869,7 +907,7 @@ async def session_main():
             else:
                 joinable = {g: i for g, i in found.items() if is_joinable(i["data"])}
                 for gid, info in joinable.items():
-                    if gid not in notified:
+                    if gid not in notified and not tier_blocked(info["tier"]):
                         q_alert(t("alert_joinable", tier=info['tier'].upper(),
                                   summary=summarize(info['data'])))
                         notified.add(gid)
@@ -889,7 +927,8 @@ async def session_main():
                 def ends_at(g):
                     dl = joinable[g]["data"].get("deadlineTimestamp")
                     return dl if isinstance(dl, (int, float)) and dl > 0 else float("inf")
-                pending = sorted((g for g in joinable if g not in done), key=ends_at)
+                pending = sorted((g for g in joinable if g not in done
+                                  and not tier_blocked(joinable[g]["tier"])), key=ends_at)
                 if not (open_page or auto_join):
                     done.update(pending)   # alert-only mode
                     pending = []
@@ -923,6 +962,12 @@ async def session_main():
                         q_log(t("log_no_new", joinable=counts[0], joined=counts[1],
                                 total=counts[2]))
                     last_no_new = counts
+
+            # Every watched tier is locked: nothing can be joined until the lock ends, so stop
+            # (the browser closes and the app shows START again) instead of trying in vain.
+            if all(tier_blocked(tier) for tier in watch_tiers):
+                q_alert(t("log_all_blocked", until=lock_end(min(blocked[tier] for tier in watch_tiers))))
+                break
 
             ui_queue.put(("next_check", interval))   # countdown in the status line
             await nap(interval)
