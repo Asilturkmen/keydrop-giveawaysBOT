@@ -164,6 +164,9 @@ TXT = {
     "set_interval": {"en": "Check interval", "tr": "Kontrol aralığı"},
     "set_interval_val": {"en": "{s} s", "tr": "{s} sn"},
     "set_tiers":    {"en": "Giveaway tiers", "tr": "Çekiliş seviyeleri"},
+    "set_min_prize": {"en": "Min. prize value (USD)", "tr": "Min. ödül değeri (USD)"},
+    "min_prize_note": {"en": "Skips giveaways whose prize is worth less. 0 = off.",
+                       "tr": "Ödülü bundan ucuz olan çekilişlere katılmaz. 0 = kapalı."},
     "open_page":    {"en": "Open the giveaway page when a new one appears (when auto-join is off)",
                      "tr": "Yeni çekilişte çekiliş sayfasını aç (otomatik katıl kapalıyken)"},
     "auto_join":    {"en": "Auto-join (only when eligible, never deposits money)",
@@ -270,6 +273,10 @@ TXT = {
                          "(Katılabilir: {joinable}, katıldıkların: {joined}, toplam izlenen: {total})"},
     "log_pick_tier": {"en": "Select at least one giveaway tier in Settings.",
                       "tr": "Ayarlar'dan en az bir çekiliş seviyesi seç."},
+    "log_bad_min_prize": {"en": "Enter a number for the min. prize value in Settings (e.g. 2 or 2.5).",
+                          "tr": "Ayarlar'da min. ödül değeri için bir sayı gir (ör. 2 veya 2,5)."},
+    "log_cheap_prize": {"en": "Prize is worth {value} USD, below your minimum of {min} USD; skipped.",
+                        "tr": "Ödül değeri {value} USD, en az {min} USD istiyorsun; atlandı."},
     "log_starting": {"en": "Starting...", "tr": "Başlatılıyor..."},
     "log_stop_req": {"en": "Stop requested...", "tr": "Durdurma istendi..."},
     "log_error": {"en": "ERROR: {e}", "tr": "HATA: {e}"},
@@ -290,6 +297,7 @@ TXT = {
 
     # summarize() field labels
     "sum_tier":         {"en": "tier", "tr": "seviye"},
+    "sum_prize":        {"en": "prize", "tr": "ödül"},
     "sum_status":       {"en": "status", "tr": "durum"},
     "sum_participants": {"en": "participants", "tr": "katılımcı"},
     "sum_remaining":    {"en": "remaining", "tr": "kalan"},
@@ -357,6 +365,11 @@ def summarize(data):
     bits = []
     if "frequency" in data:
         bits.append(f"{t('sum_tier')}={data['frequency']}")
+    prizes = data.get("prizes")
+    if isinstance(prizes, list) and prizes and isinstance(prizes[0], dict):
+        p = prizes[0]
+        name = " | ".join(str(p[k]) for k in ("title", "subtitle") if p.get(k))
+        bits.append(f"{t('sum_prize')}={name} {p.get('price', '?')} {p.get('currency') or ''}".strip())
     if "status" in data:
         bits.append(f"{t('sum_status')}={data['status']}")
     if "participantCount" in data:
@@ -482,6 +495,25 @@ def got_list_data(payloads, strict=False):
         if isinstance(body, dict) and isinstance(body.get("data"), list):
             return True
     return False
+
+
+def prize_usd(data, rates):
+    """Total prize value of a giveaway in USD, or None if it can't be told.
+    Prices come in the account's currency; `rates` is Keydrop's own table from the
+    site's init data: {currency: amount per 1 USD}."""
+    prizes = data.get("prizes")
+    if not isinstance(prizes, list) or not prizes:
+        return None
+    total = 0.0
+    for p in prizes:
+        if not isinstance(p, dict) or not isinstance(p.get("price"), (int, float)):
+            return None
+        cur = str(p.get("currency") or "USD").upper()
+        rate = 1 if cur == "USD" else rates.get(cur)
+        if not isinstance(rate, (int, float)) or rate <= 0:
+            return None
+        total += p["price"] / rate
+    return total
 
 
 def is_joinable(data):
@@ -623,7 +655,8 @@ async def session_main():
     payloads = []
     ws_frames = []
     details = {}       # giveaway id -> detail API data for the logged-in user
-    session = {}       # "logged_in": True/False, read from the site's init data
+    # From the site's init data: "logged_in": True/False, "rates": {currency: per 1 USD}
+    session = {}
     debug_other = []   # non-JSON / failed giveaway requests (helps when the list won't load)
     closed = {"v": False}
 
@@ -644,6 +677,9 @@ async def session_main():
             if INIT_API_PART in url and "json" in ctype:
                 body = await response.json()
                 session["logged_in"] = not (isinstance(body, dict) and body.get("status") is False)
+                if isinstance(body, dict) and isinstance(body.get("rates"), list):
+                    session["rates"] = {r.get("id"): r.get("rate") for r in body["rates"]
+                                        if isinstance(r, dict)}
             elif "giveaway" in url:
                 if "json" in ctype:
                     body = await response.json()
@@ -756,6 +792,7 @@ async def session_main():
         debug = config["debug"]
         open_page = config.get("open_page", True)
         auto_join = config.get("auto_join", False)
+        min_prize = config.get("min_prize", 0)
 
         notified = set()   # ids we already announced as new
         last_no_new = None # counts in the last "no new giveaways" line (logged only on a change)
@@ -833,6 +870,17 @@ async def session_main():
                         q_alert(t("alert_joinable", tier=info['tier'].upper(),
                                   summary=summarize(info['data'])))
                         notified.add(gid)
+
+                # Prize cheaper than the user's minimum: skip it without opening its page.
+                # An unknown value (e.g. Keydrop changed the data) never blocks a join.
+                if min_prize > 0:
+                    for gid, info in joinable.items():
+                        if gid in done:
+                            continue
+                        value = prize_usd(info["data"], session.get("rates") or {})
+                        if value is not None and value < min_prize:
+                            done.add(gid)
+                            q_log(t("log_cheap_prize", value=f"{value:.2f}", min=f"{min_prize:g}"))
 
                 # Soonest-ending first: an amateur giveaway lasts only a few minutes.
                 def ends_at(g):
@@ -1011,7 +1059,7 @@ FEED_MAX_LINES = 500
 # login check runs and when Keydrop can't be reached.
 # "stats": anonymous usage stats on/off; "install_id": the random id they use;
 # "pending_joins": joins not sent to the stats server yet.
-DEFAULT_SETTINGS = {"interval": 25, "tiers": ["amateur"], "auto_join": True,
+DEFAULT_SETTINGS = {"interval": 25, "tiers": ["amateur"], "min_prize": 0, "auto_join": True,
                     "open_page": True, "debug": False, "lang": None, "account": None,
                     "stats": True, "install_id": None, "pending_joins": 0}
 
@@ -1025,6 +1073,20 @@ def load_settings():
     except Exception:
         pass
     return settings
+
+
+def parse_min_prize(value, default=None):
+    """The min. prize setting as a number >= 0 ('2', '2,5', '' = 0), or `default` if invalid."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if value >= 0 else default
+    s = str(value or "").strip().replace(",", ".")
+    if not s:
+        return 0.0
+    try:
+        n = float(s)
+    except ValueError:
+        return default
+    return n if 0 <= n < 1e9 else default
 
 
 def load_avatar(size=48):
@@ -1245,6 +1307,16 @@ class App:
                             border_color=MUTED, corner_radius=6, border_width=2
                             ).grid(row=3 + i // 2, column=i % 2, sticky="w", padx=4, pady=4)
 
+        self.min_prize_lbl = ctk.CTkLabel(sett, text="", font=font(13, True), text_color=TEXT)
+        self.min_prize_lbl.grid(row=5, column=0, sticky="w", padx=4, pady=(12, 0))
+        self.min_prize = ctk.CTkEntry(sett, width=80, height=30, justify="right", font=font(13, True),
+                                      fg_color=CARD_2, border_color=BORDER, text_color=ACCENT)
+        self.min_prize.insert(0, f"{parse_min_prize(self.settings.get('min_prize')) or 0:g}")
+        self.min_prize.grid(row=5, column=1, sticky="e", padx=4, pady=(12, 0))
+        self.min_prize_note = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED,
+                                           justify="left", anchor="w", wraplength=420)
+        self.min_prize_note.grid(row=6, column=0, columnspan=2, sticky="w", padx=4)
+
         self.autojoin_var = tk.BooleanVar(value=bool(self.settings.get("auto_join", True)))
         self.openpage_var = tk.BooleanVar(value=bool(self.settings.get("open_page", True)))
         self.debug_var = tk.BooleanVar(value=bool(self.settings.get("debug", False)))
@@ -1253,18 +1325,18 @@ class App:
         for row, (key, var) in enumerate((("auto_join", self.autojoin_var),
                                           ("open_page", self.openpage_var),
                                           ("debug", self.debug_var),
-                                          ("stats", self.stats_var)), start=5):
+                                          ("stats", self.stats_var)), start=7):
             sw = ctk.CTkSwitch(sett, text="", variable=var, font=font(13), text_color=TEXT,
                                fg_color=CARD_2, progress_color=ACCENT, button_color=TEXT,
                                button_hover_color="#ffffff")
-            sw.grid(row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(10 if row == 5 else 4, 4))
+            sw.grid(row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(10 if row == 7 else 4, 4))
             self.switches[key] = sw
         self.switches["stats"].configure(command=self.on_stats_switch)   # applies right away
         self.stats_note = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED,
                                        justify="left", anchor="w", wraplength=420)
-        self.stats_note.grid(row=9, column=0, columnspan=2, sticky="w", padx=(52, 4))
+        self.stats_note.grid(row=11, column=0, columnspan=2, sticky="w", padx=(52, 4))
         self.note_lbl = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED)
-        self.note_lbl.grid(row=10, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 4))
+        self.note_lbl.grid(row=12, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 4))
 
         # --- community line (filled by the usage-stats reply; hidden until then) ---
         self.comm = ctk.CTkFrame(body, fg_color="transparent")
@@ -1308,6 +1380,8 @@ class App:
         self.int_lbl.configure(text=t("set_interval"))
         self.on_interval(self.slider.get())
         self.tiers_lbl.configure(text=t("set_tiers"))
+        self.min_prize_lbl.configure(text=t("set_min_prize"))
+        self.min_prize_note.configure(text=t("min_prize_note"))
         for key, sw in self.switches.items():
             sw.configure(text=t(key))
         self.stats_note.configure(text=t("stats_note"))
@@ -1467,8 +1541,14 @@ class App:
             self.append(t("log_pick_tier"), "alert")
             self.tabs.set(self.tab_names["settings"])
             return None
+        min_prize = parse_min_prize(self.min_prize.get())
+        if min_prize is None:
+            self.append(t("log_bad_min_prize"), "alert")
+            self.tabs.set(self.tab_names["settings"])
+            return None
         return {
             "tiers": tiers,
+            "min_prize": min_prize,
             "interval": min(120, max(10, int(round(self.slider.get())))),
             "debug": self.debug_var.get(),
             "open_page": self.openpage_var.get(),
@@ -1479,6 +1559,9 @@ class App:
         data = {
             "interval": int(round(self.slider.get())),
             "tiers": [tier for tier in ALL_TIERS if self.tier_vars[tier].get()],
+            # A half-typed value keeps the last saved one.
+            "min_prize": parse_min_prize(self.min_prize.get(),
+                                         parse_min_prize(self.settings.get("min_prize"), 0.0)),
             "auto_join": self.autojoin_var.get(),
             "open_page": self.openpage_var.get(),
             "debug": self.debug_var.get(),
@@ -1488,6 +1571,7 @@ class App:
             "install_id": self.settings.get("install_id"),
             "pending_joins": self.pending_joins(),
         }
+        self.settings["min_prize"] = data["min_prize"]
         try:
             SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:

@@ -150,6 +150,7 @@ Open the **Settings** tab in the app. Your choices are remembered.
 
 - **Check interval**: how often the bot checks Keydrop (default 25 s).
 - **Giveaway tiers**: Amateur by default; add Contender, Challenger, Champion.
+- **Min. prize value (USD)**: skip giveaways whose prize is worth less, e.g. `2` skips skins under 2 USD (0 = off, the default). Prices in other currencies are converted with Keydrop's own rates.
 - **Auto-join**: join automatically when you're eligible (on by default).
 - **Open the giveaway page**: open a new giveaway's page even when not auto-joining.
 - **DEBUG**: write `debug_payloads.json` for troubleshooting.
