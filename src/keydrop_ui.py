@@ -8,7 +8,7 @@ Control everything from this window (dark, Keydrop-style UI built with CustomTki
   - Live status with countdown, session stats, an activity feed and a settings tab
   - TR / EN toggle; settings are remembered in settings.json
   - A banner offers a one-click update when a newer release is on GitHub
-  - Anonymous usage stats (random install id, version, join count; can be turned off)
+  - Anonymous usage stats (random install id, version, language, join count; can be turned off)
 
 When a new active giveaway is found, a red line appears in the log and the detail
 page opens. It auto-joins only when Keydrop says the account is eligible (the
@@ -164,17 +164,19 @@ TXT = {
     "set_interval": {"en": "Check interval", "tr": "Kontrol aralığı"},
     "set_interval_val": {"en": "{s} s", "tr": "{s} sn"},
     "set_tiers":    {"en": "Giveaway tiers", "tr": "Çekiliş seviyeleri"},
-    "open_page":    {"en": "Open the giveaway page when a new one appears",
-                     "tr": "Yeni çekilişte çekiliş sayfasını aç"},
+    "open_page":    {"en": "Open the giveaway page when a new one appears (when auto-join is off)",
+                     "tr": "Yeni çekilişte çekiliş sayfasını aç (otomatik katıl kapalıyken)"},
     "auto_join":    {"en": "Auto-join (only when eligible, never deposits money)",
                      "tr": "Otomatik katıl (yalnızca şart sağlanmışsa, asla para yatırmaz)"},
     "debug":        {"en": "DEBUG (write debug_payloads.json)",
                      "tr": "DEBUG (debug_payloads.json yaz)"},
     "stats":        {"en": "Anonymous usage stats", "tr": "Anonim kullanım istatistikleri"},
-    "stats_note":   {"en": "Sends only a random ID, the app version and how many giveaways were "
-                           "joined. Never your Steam or Keydrop data.",
-                     "tr": "Yalnızca rastgele bir kimlik, uygulama sürümü ve katılınan çekiliş "
-                           "sayısı gönderilir. Steam veya Keydrop bilgilerin asla gönderilmez."},
+    "stats_note":   {"en": "Sends only a random ID, the app version, the language and how many "
+                           "giveaways were joined; the server adds your country (no IP is kept). "
+                           "Never your Steam or Keydrop data.",
+                     "tr": "Yalnızca rastgele bir kimlik, uygulama sürümü, dil ve katılınan çekiliş "
+                           "sayısı gönderilir; sunucu ülkeni ekler (IP saklanmaz). Steam veya "
+                           "Keydrop bilgilerin asla gönderilmez."},
     "set_note":     {"en": "Changes apply the next time you press START.",
                      "tr": "Değişiklikler bir sonraki BAŞLAT'ta geçerli olur."},
     "comm_line":    {"en": "{users} users this week  ·  {joins} giveaways joined by all bots",
@@ -277,12 +279,14 @@ TXT = {
     "log_update_done": {"en": "Updated to {tag}. Restarting...",
                         "tr": "{tag} sürümüne güncellendi. Yeniden başlatılıyor..."},
     "log_update_fail": {"en": "Update failed: {e}", "tr": "Güncelleme başarısız: {e}"},
-    "log_stats_on": {"en": "Anonymous usage stats are on: only a random ID, the app version and the "
-                           "number of joined giveaways are sent (never your Steam or Keydrop data). "
+    "log_stats_on": {"en": "Anonymous usage stats are on: only a random ID, the app version, the "
+                           "language and the number of joined giveaways are sent; the server adds "
+                           "your country (no IP is kept, never your Steam or Keydrop data). "
                            "You can turn this off in Settings.",
                      "tr": "Anonim kullanım istatistikleri açık: yalnızca rastgele bir kimlik, uygulama "
-                           "sürümü ve katılınan çekiliş sayısı gönderilir (Steam veya Keydrop "
-                           "bilgilerin asla gönderilmez). Ayarlar'dan kapatabilirsin."},
+                           "sürümü, dil ve katılınan çekiliş sayısı gönderilir; sunucu ülkeni ekler "
+                           "(IP saklanmaz, Steam veya Keydrop bilgilerin asla gönderilmez). "
+                           "Ayarlar'dan kapatabilirsin."},
 
     # summarize() field labels
     "sum_tier":         {"en": "tier", "tr": "seviye"},
@@ -754,6 +758,7 @@ async def session_main():
         auto_join = config.get("auto_join", False)
 
         notified = set()   # ids we already announced as new
+        last_no_new = None # counts in the last "no new giveaways" line (logged only on a change)
         q_status("st_monitoring")
         q_log(t("log_monitor_start", tiers=sorted(watch_tiers), interval=interval))
 
@@ -791,8 +796,6 @@ async def session_main():
 
             if should_stop():
                 break
-            if not loaded:
-                q_log(t("log_list_fail"))
 
             found = collect_giveaways(list(payloads), list(ws_frames), watch_tiers)
 
@@ -803,6 +806,15 @@ async def session_main():
                                   ensure_ascii=False, indent=2, default=str)
                 except Exception:
                     pass
+
+            # No list (connection issue etc.): try again next round. Going on would also log
+            # "no records captured", which points to a site change instead of the connection.
+            if not loaded:
+                q_log(t("log_list_fail"))
+                last_no_new = None
+                ui_queue.put(("next_check", interval))
+                await nap(interval)
+                continue
 
             # Session expired: say so, wait until the user logs in again, then go on.
             if session.get("logged_in") is False:
@@ -834,6 +846,7 @@ async def session_main():
                 # One giveaway per round: open its detail page, join it if Keydrop says
                 # we're eligible, then RETURN to the giveaway list so monitoring continues.
                 if pending:
+                    last_no_new = None
                     gid = pending[0]
                     url = detail_url(joinable[gid]["data"], gid)
                     try:
@@ -851,9 +864,14 @@ async def session_main():
                         if not should_stop():
                             q_log(t("log_detail_err", e=e))
 
+                # Every round would add a line (thousands a day); the countdown already
+                # shows the bot is alive, so only log when the numbers change.
                 if not pending:
-                    q_log(t("log_no_new", joinable=len(joinable),
-                            joined=len(joined_ids & set(found)), total=len(found)))
+                    counts = (len(joinable), len(joined_ids & set(found)), len(found))
+                    if counts != last_no_new:
+                        q_log(t("log_no_new", joinable=counts[0], joined=counts[1],
+                                total=counts[2]))
+                    last_no_new = counts
 
             ui_queue.put(("next_check", interval))   # countdown in the status line
             await nap(interval)
@@ -985,6 +1003,9 @@ WARN = "#ffb020"
 STATUS_COLORS = {"st_ready": MUTED, "st_opening": WARN, "st_wait_login": WARN,
                  "st_logged_in": SUCCESS, "st_monitoring": SUCCESS,
                  "st_stopping": WARN, "st_stopped": MUTED}
+
+# The activity feed keeps only the newest lines (the bot can run for days).
+FEED_MAX_LINES = 500
 
 # "account": the last confirmed login ({"name", "avatar", "seen"}), shown while the hidden
 # login check runs and when Keydrop can't be reached.
@@ -1428,6 +1449,9 @@ class App:
         self.feed.configure(state="normal")
         self.feed.insert("end", f"{datetime.now():%H:%M:%S}  ", "time")
         self.feed.insert("end", f"{text}\n", tag)
+        extra = int(self.feed.index("end-1c").split(".")[0]) - 1 - FEED_MAX_LINES
+        if extra > 0:   # drop the oldest lines
+            self.feed.delete("1.0", f"{extra + 1}.0")
         self.feed.see("end")
         self.feed.configure(state="disabled")
 
