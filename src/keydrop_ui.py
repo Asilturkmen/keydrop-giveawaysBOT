@@ -9,7 +9,8 @@ Control everything from this window (dark, Keydrop-style UI built with CustomTki
   - TR / EN toggle; settings are remembered in settings.json
   - The browser can run hidden (Settings); a window then opens only for the Steam login
   - A banner offers a one-click update when a newer release is on GitHub
-  - Anonymous usage stats (random install id, version, language, join count; can be turned off)
+  - Anonymous usage stats (random copy + computer ids, version, language, join count; can be
+    turned off)
 
 When a new active giveaway is found, a red line appears in the log and the detail
 page opens. It auto-joins only when Keydrop says the account is eligible (the
@@ -92,12 +93,15 @@ RAW_FILE_URL = "https://raw.githubusercontent.com/" + GITHUB_REPO + "/{tag}/{pat
 UPDATE_FILES = ("src/keydrop_ui.py", "src/requirements.txt")
 CREATOR_URL = "https://asilturkmen.com"   # the credit line at the bottom of the window
 
-# Anonymous usage stats (README → Privacy): a random install id, the app version, the language
-# and how many giveaways were joined. Nothing else; can be turned off in Settings.
-# The server's code is in stats-worker/.
+# Anonymous usage stats (README → Privacy): a random id for this copy (bot folder), a random id
+# for this computer, the app version, the language and how many giveaways this copy joined.
+# Nothing else; can be turned off in Settings. The server's code is in stats-worker/.
 STATS_URL = "https://keydrop-stats.keydrop-stats.workers.dev"
 STATS_EVERY = 3 * 3600   # while the bot runs, ping again this often (seconds)
-STATS_MAX_JOINS = 50     # joins sent per ping (the server counts no more); the rest go next time
+STATS_MAX_JOINS = 50     # old-style joins sent per ping (the server counts no more); the rest go next time
+# The computer's id is kept outside the bot folder, so every folder on this PC shares it
+# (several bots on one computer count as one user).
+DEVICE_FILE = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "KeydropBot" / "device_id"
 
 # Runs inside the Keydrop tab, so it has the browser's cookies (and gets past Cloudflare).
 _FETCH_JSON_JS = """async (url) => {
@@ -183,12 +187,12 @@ TXT = {
     "debug":        {"en": "DEBUG (write debug_payloads.json)",
                      "tr": "DEBUG (debug_payloads.json yaz)"},
     "stats":        {"en": "Anonymous usage stats", "tr": "Anonim kullanım istatistikleri"},
-    "stats_note":   {"en": "Sends only a random ID, the app version, the language and how many "
-                           "giveaways were joined; the server adds your country (no IP is kept). "
-                           "Never your Steam or Keydrop data.",
-                     "tr": "Yalnızca rastgele bir kimlik, uygulama sürümü, dil ve katılınan çekiliş "
-                           "sayısı gönderilir; sunucu ülkeni ekler (IP saklanmaz). Steam veya "
-                           "Keydrop bilgilerin asla gönderilmez."},
+    "stats_note":   {"en": "Sends only two random IDs (this copy, this computer), the app version, "
+                           "the language and how many giveaways were joined; the server adds your "
+                           "country (no IP is kept). Never your Steam or Keydrop data.",
+                     "tr": "Yalnızca iki rastgele kimlik (bu kopya, bu bilgisayar), uygulama sürümü, "
+                           "dil ve katılınan çekiliş sayısı gönderilir; sunucu ülkeni ekler (IP "
+                           "saklanmaz). Steam veya Keydrop bilgilerin asla gönderilmez."},
     "set_note":     {"en": "Changes apply the next time you press START.",
                      "tr": "Değişiklikler bir sonraki BAŞLAT'ta geçerli olur."},
     "comm_line":    {"en": "{users} users this week  ·  {joins} giveaways joined by all bots",
@@ -314,14 +318,14 @@ TXT = {
     "log_update_done": {"en": "Updated to {tag}. Restarting...",
                         "tr": "{tag} sürümüne güncellendi. Yeniden başlatılıyor..."},
     "log_update_fail": {"en": "Update failed: {e}", "tr": "Güncelleme başarısız: {e}"},
-    "log_stats_on": {"en": "Anonymous usage stats are on: only a random ID, the app version, the "
-                           "language and the number of joined giveaways are sent; the server adds "
-                           "your country (no IP is kept, never your Steam or Keydrop data). "
-                           "You can turn this off in Settings.",
-                     "tr": "Anonim kullanım istatistikleri açık: yalnızca rastgele bir kimlik, uygulama "
-                           "sürümü, dil ve katılınan çekiliş sayısı gönderilir; sunucu ülkeni ekler "
-                           "(IP saklanmaz, Steam veya Keydrop bilgilerin asla gönderilmez). "
-                           "Ayarlar'dan kapatabilirsin."},
+    "log_stats_on": {"en": "Anonymous usage stats are on: only two random IDs (this copy, this "
+                           "computer), the app version, the language and the number of joined "
+                           "giveaways are sent; the server adds your country (no IP is kept, never "
+                           "your Steam or Keydrop data). You can turn this off in Settings.",
+                     "tr": "Anonim kullanım istatistikleri açık: yalnızca iki rastgele kimlik (bu kopya, "
+                           "bu bilgisayar), uygulama sürümü, dil ve katılınan çekiliş sayısı "
+                           "gönderilir; sunucu ülkeni ekler (IP saklanmaz, Steam veya Keydrop "
+                           "bilgilerin asla gönderilmez). Ayarlar'dan kapatabilirsin."},
 
     # summarize() field labels
     "sum_tier":         {"en": "tier", "tr": "seviye"},
@@ -618,11 +622,29 @@ def apply_update(tag):
         (ROOT / path).write_bytes(data)
 
 
-def send_ping(install_id, joins):
-    """Anonymous usage ping (runs in a thread). The reply carries the community numbers
-    and how many of the `joins` the server counted."""
-    body = json.dumps({"id": install_id, "v": __version__, "lang": _LANG["v"],
-                       "joins": joins}).encode()
+def device_id():
+    """This computer's random id (the same for every bot folder on it), made on the first
+    ping; None if it can't be kept."""
+    try:
+        DEVICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        new = uuid.uuid4().hex
+        try:
+            with open(DEVICE_FILE, "x", encoding="utf-8") as f:   # bots started together:
+                f.write(new)                                     # the first one's id wins
+            return new
+        except FileExistsError:
+            saved = DEVICE_FILE.read_text(encoding="utf-8").strip()
+            return saved if re.fullmatch(r"[0-9a-f]{32}", saved) else None
+    except OSError:
+        return None
+
+
+def send_ping(install_id, total, joins):
+    """Anonymous usage ping (runs in a thread). `total` = giveaways this copy joined so far,
+    `joins` = old-style count not sent yet (from v1.3.0). The reply carries the community
+    numbers and how many of the `joins` the server counted."""
+    body = json.dumps({"id": install_id, "device": device_id(), "v": __version__,
+                       "lang": _LANG["v"], "total": total, "joins": joins}).encode()
     try:
         req = urllib.request.Request(STATS_URL + "/ping", data=body,
                                      headers={"User-Agent": "keydrop-bot",
@@ -1200,11 +1222,13 @@ FEED_MAX_LINES = 500
 
 # "account": the last confirmed login ({"name", "avatar", "seen"}), shown while the hidden
 # login check runs and when Keydrop can't be reached.
-# "stats": anonymous usage stats on/off; "install_id": the random id they use;
-# "pending_joins": joins not sent to the stats server yet.
+# "stats": anonymous usage stats on/off; "install_id": the random id of this copy;
+# "joins_total": giveaways joined while the stats were on (sent as a total, so a lost reply
+# can't count them twice); "pending_joins": old-style count from v1.3.0 not sent yet.
 DEFAULT_SETTINGS = {"interval": 25, "tiers": ["amateur"], "min_prize": 0, "auto_join": True,
                     "open_page": True, "hide_browser": False, "debug": False, "lang": None,
-                    "account": None, "stats": True, "install_id": None, "pending_joins": 0}
+                    "account": None, "stats": True, "install_id": None, "joins_total": 0,
+                    "pending_joins": 0}
 
 
 def load_settings():
@@ -1730,6 +1754,7 @@ class App:
             "account": self.settings.get("account"),
             "stats": self.stats_var.get(),
             "install_id": self.settings.get("install_id"),
+            "joins_total": self.joins_total(),
             "pending_joins": self.pending_joins(),
         }
         self.settings["min_prize"] = data["min_prize"]
@@ -1743,19 +1768,25 @@ class App:
         n = self.settings.get("pending_joins")
         return n if isinstance(n, int) and n > 0 else 0
 
+    def joins_total(self):
+        n = self.settings.get("joins_total")
+        return n if isinstance(n, int) and n > 0 else 0
+
     def ping(self):
         """Tell the stats server this install is in use (only if allowed in Settings)."""
         if self.pinging or not self.stats_var.get():
             return
-        if not re.fullmatch(r"[0-9a-f]{32}", str(self.settings.get("install_id"))):
+        new_copy = not re.fullmatch(r"[0-9a-f]{32}", str(self.settings.get("install_id")))
+        if new_copy:
             self.settings["install_id"] = uuid.uuid4().hex   # random, not tied to anyone
             self.save_settings()
+        if new_copy or not DEVICE_FILE.exists():   # also once when the computer id is new (v1.4.0)
             self.append(t("log_stats_on"))
         self.pinging = True
         self.last_ping = time.time()
         joins = min(self.pending_joins(), STATS_MAX_JOINS)
-        threading.Thread(target=send_ping, args=(self.settings["install_id"], joins),
-                         daemon=True).start()
+        threading.Thread(target=send_ping, args=(self.settings["install_id"], self.joins_total(),
+                                                 joins), daemon=True).start()
 
     def on_stats_switch(self):
         if self.stats_var.get():
@@ -1895,7 +1926,7 @@ class App:
                     self.last_join = datetime.now().strftime("%H:%M")
                     self.update_stats()
                     if self.stats_var.get():   # counted with the next usage-stats ping
-                        self.settings["pending_joins"] = self.pending_joins() + 1
+                        self.settings["joins_total"] = self.joins_total() + 1
                         self.save_settings()
                 elif kind == "status":
                     self.set_status(payload)

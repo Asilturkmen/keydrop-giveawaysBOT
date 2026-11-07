@@ -52,12 +52,12 @@ If you've been searching for a **Keydrop bot**, a **Keydrop giveaways bot**, a *
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://keydrop-stats.keydrop-stats.workers.dev/card.svg?theme=dark" />
-    <img src="https://keydrop-stats.keydrop-stats.workers.dev/card.svg?theme=light" width="840" alt="Keydrop Bot live stats: downloads, installs, weekly users and giveaways joined by everyone using the bot" />
+    <img src="https://keydrop-stats.keydrop-stats.workers.dev/card.svg?theme=light" width="840" alt="Keydrop Bot live stats: downloads, countries, weekly users and giveaways joined by everyone using the bot" />
   </picture>
 </p>
 
 <p align="center">
-  <sub>Real numbers from everyone using Keydrop Bot, refreshed every few minutes. Counted anonymously, see <a href="#-security--privacy">Security &amp; Privacy</a>.</sub>
+  <sub>Real numbers from everyone using Keydrop Bot, refreshed every few minutes. A user is a computer running the bot: several bots on one PC count once. Counted anonymously, see <a href="#-security--privacy">Security &amp; Privacy</a>.</sub>
 </p>
 
 ---
@@ -155,7 +155,7 @@ Open the **Settings** tab in the app. Your choices are remembered.
 - **Open the giveaway page**: open a new giveaway's page even when not auto-joining.
 - **Hide the browser**: the bot's Chrome window stays hidden while it works (off by default). A window opens only when you need to log in with Steam, and closes again after the login. Applies the next time you press START.
 - **DEBUG**: write `debug_payloads.json` for troubleshooting.
-- **Anonymous usage stats**: on by default; feeds the live numbers above. Sends only a random ID, the app version, the language and the join count ([details](#-security--privacy)).
+- **Anonymous usage stats**: on by default; feeds the live numbers above. Sends only two random IDs, the app version, the language and the join count ([details](#-security--privacy)).
 
 <p align="center">
   <img src="docs/settings.png" alt="Keydrop Bot settings tab: check interval slider, giveaway tiers, auto-join, open page and DEBUG switches" width="380" />
@@ -189,7 +189,7 @@ When a new version is released, the app shows a **"New version available"** bann
 
 Created while running (personal, **never pushed to GitHub**): `keydrop_profile/` (your browser session), `settings.json`, `avatar.jpg` (your Steam photo for the account card), `debug_payloads.json`, `.tools/`.
 
-**Uninstall:** delete the folder and the desktop shortcut. The shared Python and browser downloads live in `%LOCALAPPDATA%\uv` and `%LOCALAPPDATA%\ms-playwright`; delete those too if nothing else uses them.
+**Uninstall:** delete the folder, the desktop shortcut and `%LOCALAPPDATA%\KeydropBot` (the stats' computer ID). The shared Python and browser downloads live in `%LOCALAPPDATA%\uv` and `%LOCALAPPDATA%\ms-playwright`; delete those too if nothing else uses them.
 
 ---
 
@@ -203,10 +203,11 @@ The [live stats](#-live-stats) come from a tiny anonymous ping the app sends whe
 
 | What | Example |
 |------|---------|
-| A random install ID, made up by the app on its first start | `7aeeb6e9bab44454afe28c471a1b2f97` |
-| The app version | `1.2.0` |
+| A random ID for this copy of the bot, made up on its first start (kept in its `settings.json`) | `7aeeb6e9bab44454afe28c471a1b2f97` |
+| A random ID for this computer, the same for every copy on it, so several bots on one PC count as one user (kept in `%LOCALAPPDATA%\KeydropBot`) | `3f0c9d21e85a4b7c9a6d14e2b0f87c55` |
+| The app version | `1.4.0` |
 | The app language | `en` |
-| Giveaways joined since the last ping | `3` |
+| Giveaways this copy has joined in total | `120` |
 
 - **Never sent:** your Steam or Keydrop account, name, Steam ID, photo, cookies, balance, or anything from the browser.
 - **Not stored:** your IP address. Cloudflare, which runs the stats server, only adds your country (for example `TR`).
@@ -242,7 +243,7 @@ No. Just double-click `KeydropBot.bat`.
 It never sends your Steam credentials anywhere; it only uses your own local browser session.
 
 **Does the bot collect any data?**
-Only anonymous usage stats (a random ID, the app version, the language and the number of joined giveaways) for the live numbers in this README. Never any account data. You can turn it off in Settings; see [Security & Privacy](#-security--privacy).
+Only anonymous usage stats (two random IDs, the app version, the language and the number of joined giveaways) for the live numbers in this README. Never any account data. You can turn it off in Settings; see [Security & Privacy](#-security--privacy).
 
 **Can it run 24/7 as a giveaways bot?**
 Yes. Leave it running and it keeps monitoring Keydrop and joining new giveaways.

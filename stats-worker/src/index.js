@@ -1,7 +1,10 @@
 /**
  * Keydrop Bot - anonymous usage stats (Cloudflare Worker + D1).
  *
- *   POST /ping      the app says "I'm running": {id, v, lang, joins}
+ *   POST /ping      the app says "I'm running": {id, device, v, lang, total, joins}
+ *                   id = this copy (bot folder), device = this computer (shared by every
+ *                   folder on it), total = giveaways this copy joined so far,
+ *                   joins = old-style count since the last ping (v1.3.0 and older)
  *   GET  /stats     the public numbers as JSON (README badges and the app read this)
  *   GET  /card.svg  the stats card shown in the README (?theme=dark|light)
  *
@@ -12,8 +15,13 @@ const REPO = "Asilturkmen/keydrop-giveawaysBOT";
 const DAY = 86400;
 const STATS_TTL = 600;        // recompute the public numbers at most every 10 minutes
 const DOWNLOADS_TTL = 3600;   // ask GitHub for the download count at most once an hour
-const MAX_JOINS = 50;         // per ping; the app sends the rest with its next ping
+const MAX_JOINS = 50;         // old-style joins per ping; the app sends the rest with its next ping
+// A copy's total may grow at most this much since its last ping (Amateur allows ~20 joins
+// an hour), so a made-up number can't inflate the count; the rest is counted later.
+const JOINS_PER_HOUR = 30;
+const JOINS_GRACE = 30;
 const KEEP_DAYS = 60;         // the daily activity rows are deleted after this
+const STATS_VERSION = 2;      // bump when the stats' fields change (drops the cached copy)
 
 export default {
   async fetch(request, env) {
@@ -44,19 +52,30 @@ async function ping(request, env) {
   }
   const id = String(body?.id ?? "");
   if (!/^[0-9a-f]{32}$/.test(id)) return badRequest();
+  const device = /^[0-9a-f]{32}$/.test(body.device ?? "") ? body.device : null;
   const version = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(body.v) ? body.v : null;
   const lang = ["en", "tr"].includes(body.lang) ? body.lang : null;
   const joins = Number.isInteger(body.joins) ? Math.min(Math.max(body.joins, 0), MAX_JOINS) : 0;
   const country = /^[A-Z]{2}$/.test(request.cf?.country ?? "") ? request.cf.country : null;
 
   const now = nowSec();
+  // The copy's join total only grows, and only as fast as joining really can.
+  const known = await env.DB.prepare("SELECT joins, last_seen FROM installs WHERE id = ?1")
+    .bind(id).first();
+  let total = known?.joins ?? 0;
+  if (Number.isInteger(body.total) && body.total > total) {
+    const hours = known ? Math.max(now - known.last_seen, 0) / 3600 : 0;
+    total = Math.min(body.total, total + Math.ceil(hours * JOINS_PER_HOUR) + JOINS_GRACE);
+  }
   const writes = [
     env.DB.prepare(
-      `INSERT INTO installs (id, first_seen, last_seen, version, lang, country)
-       VALUES (?1, ?2, ?2, ?3, ?4, ?5)
+      `INSERT INTO installs (id, first_seen, last_seen, version, lang, country, device, joins)
+       VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7)
        ON CONFLICT (id) DO UPDATE SET last_seen = excluded.last_seen, version = excluded.version,
-         lang = excluded.lang, country = excluded.country`,
-    ).bind(id, now, version, lang, country),
+         lang = excluded.lang, country = COALESCE(excluded.country, installs.country),
+         device = COALESCE(excluded.device, installs.device),
+         joins = MAX(installs.joins, excluded.joins)`,
+    ).bind(id, now, version, lang, country, device, total),
     env.DB.prepare("INSERT OR IGNORE INTO daily (day, id) VALUES (?1, ?2)").bind(isoDay(now), id),
   ];
   if (joins > 0) {
@@ -66,7 +85,7 @@ async function ping(request, env) {
     ).bind(joins));
   }
   await env.DB.batch(writes);
-  // `joins` = how many were counted, so the app keeps only the rest for later.
+  // `joins` = how many old-style joins were counted, so the app keeps only the rest for later.
   return json({ ok: true, joins, stats: await getStats(env) }, 0);
 }
 
@@ -75,7 +94,10 @@ async function ping(request, env) {
 async function getStats(env) {
   const now = nowSec();
   const cached = await env.DB.prepare("SELECT text, updated FROM meta WHERE key = 'stats'").first();
-  if (cached?.text && now - cached.updated < STATS_TTL) return JSON.parse(cached.text);
+  if (cached?.text && now - cached.updated < STATS_TTL) {
+    const stats = JSON.parse(cached.text);
+    if (stats.version === STATS_VERSION) return stats;
+  }
   const stats = await computeStats(env, now);
   await env.DB.prepare(
     `INSERT INTO meta (key, text, updated) VALUES ('stats', ?1, ?2)
@@ -84,34 +106,56 @@ async function getStats(env) {
   return stats;
 }
 
+// A user = a computer: copies that sent the same device id count once. Copies older than
+// v1.4.0 send no device id, so each of those still counts as its own user.
+const USER = "COALESCE(device, id)";
+
 async function computeStats(env, now) {
   const today = isoDay(now);
   const from = isoDay(now - 30 * DAY);
-  const [installs, active24h, active7d, joins, daily] = await env.DB.batch([
+  const [installs, users, active24h, active7d, bots7d, countries, joins, daily] = await env.DB.batch([
     env.DB.prepare("SELECT COUNT(*) AS n FROM installs"),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM installs WHERE last_seen > ?1").bind(now - DAY),
+    env.DB.prepare(`SELECT COUNT(DISTINCT ${USER}) AS n FROM installs`),
+    env.DB.prepare(`SELECT COUNT(DISTINCT ${USER}) AS n FROM installs WHERE last_seen > ?1`)
+      .bind(now - DAY),
+    env.DB.prepare(`SELECT COUNT(DISTINCT ${USER}) AS n FROM installs WHERE last_seen > ?1`)
+      .bind(now - 7 * DAY),
     env.DB.prepare("SELECT COUNT(*) AS n FROM installs WHERE last_seen > ?1").bind(now - 7 * DAY),
-    env.DB.prepare("SELECT num FROM meta WHERE key = 'joins'"),
+    // XX = Cloudflare couldn't tell the country
+    env.DB.prepare("SELECT COUNT(DISTINCT country) AS n FROM installs WHERE country != 'XX'"),
+    // old-style counter (v1.3.0 and older) + every copy's own total
     env.DB.prepare(
-      "SELECT day, COUNT(*) AS n FROM daily WHERE day >= ?1 AND day < ?2 GROUP BY day ORDER BY day",
+      "SELECT COALESCE((SELECT num FROM meta WHERE key = 'joins'), 0) + "
+      + "(SELECT COALESCE(SUM(joins), 0) FROM installs) AS n",
+    ),
+    env.DB.prepare(
+      `SELECT d.day, COUNT(DISTINCT COALESCE(i.device, d.id)) AS n
+       FROM daily d LEFT JOIN installs i ON i.id = d.id
+       WHERE d.day >= ?1 AND d.day < ?2 GROUP BY d.day ORDER BY d.day`,
     ).bind(from, today),
     env.DB.prepare("DELETE FROM daily WHERE day < ?1").bind(isoDay(now - KEEP_DAYS * DAY)),
   ]);
   const stats = {
+    version: STATS_VERSION,
     downloads: await getDownloads(env, now),
-    installs: installs.results[0].n,
-    active_24h: active24h.results[0].n,
-    active_7d: active7d.results[0].n,
-    joins: joins.results[0]?.num ?? 0,
+    users: users.results[0].n,             // computers that ever ran the app
+    active_24h: active24h.results[0].n,    // ...in the last day
+    active_7d: active7d.results[0].n,      // ...in the last week ("weekly users")
+    countries: countries.results[0].n,
+    installs: installs.results[0].n,       // copies (bot folders) that ever ran
+    bots_7d: bots7d.results[0].n,          // copies that ran in the last week
+    joins: joins.results[0].n,
     trend: fillDays(daily.results, today),   // daily users, finished days only (oldest first)
     updated: now,
   };
   // Ready-made texts for the README badges (shields.io shows values as they are).
   stats.text = {
     downloads: stats.downloads == null ? "—" : compact(stats.downloads),
-    installs: compact(stats.installs),
+    users: compact(stats.users),
     active_24h: compact(stats.active_24h),
     active_7d: compact(stats.active_7d),
+    countries: compact(stats.countries),
+    installs: compact(stats.installs),
     joins: compact(stats.joins),
   };
   return stats;
@@ -162,7 +206,8 @@ const THEMES = {
 // 20x20 line icons
 const ICONS = {
   download: "M10 3.5v9M6 9l4 4 4-4M4 16.5h12",
-  installs: "M4.5 3.5h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2zM7 17h6M10 13.5V17",
+  globe: "M10 2.5a7.5 7.5 0 1 0 0 15a7.5 7.5 0 1 0 0-15zM2.5 10h15"
+       + "M10 2.5c2 2.1 3 4.6 3 7.5s-1 5.4-3 7.5M10 2.5c-2 2.1-3 4.6-3 7.5s1 5.4 3 7.5",
   active: "M2 10.5h3.5l2.2-5.5 4.6 11 2.2-5.5H18",
   gift: "M3.5 9.5h13V17a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1zM2.5 6.5h15v3h-15zM10 6.5V18"
       + "M10 6.5C8.6 3.4 5.4 3.6 6.1 5.6c.4 1 2.2.9 3.9.9zM10 6.5c1.4-3.1 4.6-2.9 3.9-.9-.4 1-2.2.9-3.9.9z",
@@ -175,8 +220,8 @@ function card(stats, theme) {
   const c = THEMES[theme] || THEMES.dark;
   const tiles = [
     ["download", "Downloads", stats.text.downloads],
-    ["installs", "Installs", stats.text.installs],
-    ["active", "Active this week", stats.text.active_7d],
+    ["globe", "Countries", stats.text.countries],
+    ["active", "Users this week", stats.text.active_7d],
     ["gift", "Giveaways joined", stats.text.joins],
   ];
   const tileW = (W - 56 - 36) / 4;
@@ -196,8 +241,8 @@ function card(stats, theme) {
   }).join("");
 
   const updated = new Date(stats.updated * 1000).toISOString().slice(11, 16);
-  const desc = `${stats.text.downloads} downloads, ${stats.text.installs} installs, `
-    + `${stats.text.active_7d} active this week, ${stats.text.joins} giveaways joined.`;
+  const desc = `${stats.text.downloads} downloads, used in ${stats.text.countries} countries, `
+    + `${stats.text.active_7d} users this week, ${stats.text.joins} giveaways joined.`;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"
      role="img" aria-labelledby="title desc">
