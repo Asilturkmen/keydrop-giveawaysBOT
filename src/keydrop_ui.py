@@ -46,7 +46,7 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw
 from playwright.async_api import async_playwright
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # --------------------------- CONSTANTS ------------------------------
 
