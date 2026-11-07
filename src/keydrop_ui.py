@@ -7,6 +7,7 @@ Control everything from this window (dark, Keydrop-style UI built with CustomTki
   - Account card with your Steam photo; a hidden browser checks the login when the app opens
   - Live status with countdown, session stats, an activity feed and a settings tab
   - TR / EN toggle; settings are remembered in settings.json
+  - The browser can run hidden (Settings); a window then opens only for the Steam login
   - A banner offers a one-click update when a newer release is on GitHub
   - Anonymous usage stats (random install id, version, language, join count; can be turned off)
 
@@ -109,6 +110,9 @@ ui_queue = queue.Queue()
 stop_event = threading.Event()      # close the browser and end the session
 monitor_event = threading.Event()   # the user pressed Start: run the bot once logged in
 run_config = {}                     # settings for the bot, filled when Start is pressed
+# The browser of the next session: "hide" = run it hidden (headless), "show" = start with
+# the window anyway (the Log in button). Filled when Start / Log in opens a session.
+session_opts = {}
 worker_thread = None
 
 # --------------------------- I18N (TR / EN) ------------------------------
@@ -174,6 +178,8 @@ TXT = {
                      "tr": "Yeni çekilişte çekiliş sayfasını aç (otomatik katıl kapalıyken)"},
     "auto_join":    {"en": "Auto-join (only when eligible, never deposits money)",
                      "tr": "Otomatik katıl (yalnızca şart sağlanmışsa, asla para yatırmaz)"},
+    "hide_browser": {"en": "Hide the browser (a window opens only when you need to log in)",
+                     "tr": "Tarayıcıyı gizle (yalnızca giriş gerekirse pencere açılır)"},
     "debug":        {"en": "DEBUG (write debug_payloads.json)",
                      "tr": "DEBUG (debug_payloads.json yaz)"},
     "stats":        {"en": "Anonymous usage stats", "tr": "Anonim kullanım istatistikleri"},
@@ -208,6 +214,16 @@ TXT = {
                         "bot bunu hatırlar."},
     "log_page_fail": {"en": "Could not open page: {e}", "tr": "Sayfa açılamadı: {e}"},
     "log_browser_opened": {"en": "Browser opened.", "tr": "Tarayıcı açıldı."},
+    "log_browser_hidden": {"en": "Browser opened hidden (Settings → Hide the browser).",
+                           "tr": "Tarayıcı gizli açıldı (Ayarlar → Tarayıcıyı gizle)."},
+    "log_login_window": {"en": "You need to log in: opening the login window...",
+                         "tr": "Giriş gerekiyor: giriş penceresi açılıyor..."},
+    "log_hidden_no_answer": {"en": "Keydrop didn't answer in the hidden browser; opening the "
+                                   "window so you can see the page (it stays open this time).",
+                             "tr": "Keydrop gizli tarayıcıda yanıt vermedi; sayfayı görebilmen "
+                                   "için pencere açılıyor (bu sefer açık kalacak)."},
+    "log_hiding_browser": {"en": "Login done; the window closes and the browser goes on hidden.",
+                           "tr": "Giriş tamam; pencere kapanıyor, tarayıcı gizli devam ediyor."},
     "log_browser_fail": {"en": "Couldn't open the browser: {e}. If the bot's browser is already "
                                "open in another window, close it and try again.",
                          "tr": "Tarayıcı açılamadı: {e}. Botun tarayıcısı başka bir pencerede "
@@ -642,18 +658,46 @@ def install_chromium():
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
-async def launch_browser(p):
-    """Open Chromium with the saved profile; downloads Chromium once if it's missing."""
-    kwargs = dict(headless=False, viewport={"width": 1280, "height": 800},
-                  args=["--disable-blink-features=AutomationControlled"])
+def chrome_user_agent():
+    """The user agent a normal window of Playwright's Chromium sends, or None if unknown.
+    A hidden browser says 'HeadlessChrome' instead of 'Chrome', which sites can spot."""
     try:
-        return await p.chromium.launch_persistent_context(str(USER_DATA_DIR), **kwargs)
+        import playwright
+        info = json.loads((Path(playwright.__file__).parent / "driver" / "package"
+                           / "browsers.json").read_text(encoding="utf-8"))
+        version = next(b["browserVersion"] for b in info["browsers"] if b["name"] == "chromium")
+        major = int(version.split(".")[0])
+    except Exception:
+        return None
+    return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36")
+
+
+def browser_options(hidden):
+    """Options for opening the saved profile, as a window or hidden (headless)."""
+    opts = dict(headless=hidden, viewport={"width": 1280, "height": 800},
+                args=["--disable-blink-features=AutomationControlled"])
+    if hidden:
+        # channel="chromium": the full browser in headless mode (KeydropBot.bat
+        # installs Chromium with --no-shell, so there's no separate headless build).
+        opts["channel"] = "chromium"
+        ua = chrome_user_agent()
+        if ua:
+            opts["user_agent"] = ua
+    return opts
+
+
+async def launch_browser(p, hidden):
+    """Open Chromium with the saved profile; downloads Chromium once if it's missing."""
+    try:
+        return await p.chromium.launch_persistent_context(str(USER_DATA_DIR),
+                                                          **browser_options(hidden))
     except Exception as e:
         if "playwright install" not in str(e):
             raise
     q_log(t("log_installing_browser"))
     await asyncio.to_thread(install_chromium)
-    return await p.chromium.launch_persistent_context(str(USER_DATA_DIR), **kwargs)
+    return await p.chromium.launch_persistent_context(str(USER_DATA_DIR), **browser_options(hidden))
 
 
 async def login_state(ctx):
@@ -681,10 +725,15 @@ async def session_main():
     # From the site's init data: "logged_in": True/False, "rates": {currency: per 1 USD}
     session = {}
     debug_other = []   # non-JSON / failed giveaway requests (helps when the list won't load)
-    closed = {"v": False}
+    closed = {"v": False}   # the user closed the browser window
+    failed = {"v": False}   # the browser couldn't be (re)opened
+    browser = {"pw": None, "ctx": None, "page": None, "hidden": False}
+    # "hidden": run the browser hidden when no login is needed (Settings);
+    # "keep_window": Keydrop didn't answer while hidden, so the window stays this session.
+    want = {"hidden": bool(session_opts.get("hide")), "keep_window": False}
 
     def should_stop():
-        return stop_event.is_set() or closed["v"]
+        return stop_event.is_set() or closed["v"] or failed["v"]
 
     async def nap(secs):
         """Sleep that wakes up early when the session ends."""
@@ -728,18 +777,64 @@ async def session_main():
                 pass
         ws.on("framereceived", on_frame)
 
-    async def wait_for_login(ctx):
-        """Return True once Keydrop says we're logged in, False if the session ends first."""
+    async def open_browser(hidden):
+        """(Re)open the browser on the giveaway list, hidden or as a window.
+        False if it can't be opened (the session then ends)."""
+        old = browser["ctx"]
+        browser["ctx"] = None   # closing it on purpose isn't "the user closed the browser"
+        if old is not None:
+            try:
+                await old.close()
+            except Exception:
+                pass
+        try:
+            ctx = await launch_browser(browser["pw"], hidden)
+        except Exception as e:
+            q_alert(t("log_browser_fail", e=str(e).strip().splitlines()[0] if str(e).strip() else e))
+            failed["v"] = True
+            return False
+        browser.update(ctx=ctx, hidden=hidden)
+        ctx.on("close", lambda _: closed.__setitem__("v", True) if browser["ctx"] is ctx else None)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        browser["page"] = page
+        page.on("response", lambda r: asyncio.create_task(handle_response(r)))
+        page.on("requestfailed", handle_failed)
+        page.on("websocket", handle_ws)
+        try:
+            await page.goto(GIVEAWAYS_URL, wait_until="domcontentloaded")
+        except Exception as e:
+            if not should_stop():
+                q_log(t("log_page_fail", e=e))
+        return True
+
+    async def wait_for_login():
+        """Return True once Keydrop says we're logged in, False if the session ends first.
+        The Steam login needs a window: a hidden browser opens one for it and goes back
+        to hidden after the login."""
         told = False
+        since = time.time()
         while not should_stop():
-            state = await login_state(ctx)
+            state = await login_state(browser["ctx"])
+            if state is None and browser["hidden"] and time.time() - since > LOGIN_CHECK_TIMEOUT:
+                # e.g. a Cloudflare check or no internet: let the user see the page
+                q_alert(t("log_hidden_no_answer"))
+                want["keep_window"] = True
+                await open_browser(hidden=False)
+                continue
             if state is not None:
                 ok, name, avatar = state
                 if ok:
                     session["logged_in"] = True
                     q_account("in", name, avatar)
                     q_log(t("log_logged_in", name=name or "?"))
-                    return True
+                    if want["hidden"] and not want["keep_window"] and not browser["hidden"]:
+                        q_log(t("log_hiding_browser"))
+                        await open_browser(hidden=True)
+                    return not should_stop()
+                if browser["hidden"]:
+                    q_log(t("log_login_window"))
+                    await open_browser(hidden=False)
+                    continue
                 if not told:
                     q_account("out")
                     q_status("st_wait_login")
@@ -827,7 +922,7 @@ async def session_main():
         else:
             failed_attempt(gid, "log_join_unverified")
 
-    async def run_bot(ctx, page, config):
+    async def run_bot(config):
         watch_tiers = config["tiers"]
         interval = config["interval"]
         debug = config["debug"]
@@ -835,12 +930,21 @@ async def session_main():
         auto_join = config.get("auto_join", False)
         min_prize = config.get("min_prize", 0)
 
+        # "Hide the browser" was switched after Log in: open the browser the chosen way.
+        want["hidden"] = config.get("hide", False)
+        hidden = want["hidden"] and not want["keep_window"]
+        if hidden != browser["hidden"]:
+            if not await open_browser(hidden):
+                return
+            q_log(t("log_browser_hidden" if hidden else "log_browser_opened"))
+
         notified = set()   # ids we already announced as new
         last_no_new = None # counts in the last "no new giveaways" line (logged only on a change)
         q_status("st_monitoring")
         q_log(t("log_monitor_start", tiers=sorted(watch_tiers), interval=interval))
 
         while not should_stop():
+            page = browser["page"]        # a new one after a login window (hidden mode)
             if page.is_closed():          # the user closed the bot's tab
                 closed["v"] = True
                 break
@@ -895,9 +999,10 @@ async def session_main():
                 continue
 
             # Session expired: say so, wait until the user logs in again, then go on.
+            # (A hidden browser opens the login window for it.)
             if session.get("logged_in") is False:
                 q_alert(t("log_logged_out"))
-                if not await wait_for_login(ctx):
+                if not await wait_for_login():
                     break
                 q_status("st_monitoring")
                 continue
@@ -973,38 +1078,31 @@ async def session_main():
             await nap(interval)
 
     async with async_playwright() as p:
+        browser["pw"] = p
         try:
-            ctx = await launch_browser(p)
-        except Exception as e:
-            q_alert(t("log_browser_fail", e=str(e).strip().splitlines()[0] if str(e).strip() else e))
-            return
-        ctx.on("close", lambda _: closed.__setitem__("v", True))
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        page.on("response", lambda r: asyncio.create_task(handle_response(r)))
-        page.on("requestfailed", handle_failed)
-        page.on("websocket", handle_ws)
-        try:
-            try:
-                await page.goto(GIVEAWAYS_URL, wait_until="domcontentloaded")
-            except Exception as e:
-                q_log(t("log_page_fail", e=e))
-            q_log(t("log_browser_opened"))
+            # Log in always shows the window; otherwise hidden if chosen in Settings
+            # (a login window still opens when one is needed).
+            hidden = want["hidden"] and not session_opts.get("show")
+            if not await open_browser(hidden):
+                return
+            q_log(t("log_browser_hidden" if hidden else "log_browser_opened"))
             q_account("checking")
-            if await wait_for_login(ctx):
+            if await wait_for_login():
                 if not monitor_event.is_set():       # opened with "Log in": wait for Start
                     q_status("st_logged_in")
                     q_log(t("log_press_start"))
                 while not monitor_event.is_set() and not should_stop():
                     await asyncio.sleep(0.3)
                 if not should_stop():
-                    await run_bot(ctx, page, dict(run_config))
+                    await run_bot(dict(run_config))
         finally:
             if closed["v"] and not stop_event.is_set():
                 q_alert(t("log_browser_closed"))
-            try:
-                await ctx.close()
-            except Exception:
-                pass
+            if browser["ctx"] is not None:
+                try:
+                    await browser["ctx"].close()
+                except Exception:
+                    pass
 
 
 async def check_login():
@@ -1015,11 +1113,8 @@ async def check_login():
     state = None
     async with async_playwright() as p:
         try:
-            # channel="chromium": the full browser in headless mode (KeydropBot.bat
-            # installs Chromium with --no-shell, so there's no separate headless build).
-            ctx = await p.chromium.launch_persistent_context(
-                str(USER_DATA_DIR), headless=True, channel="chromium",
-                args=["--disable-blink-features=AutomationControlled"])
+            ctx = await p.chromium.launch_persistent_context(str(USER_DATA_DIR),
+                                                             **browser_options(hidden=True))
         except Exception:
             return
         deadline = time.time() + LOGIN_CHECK_TIMEOUT
@@ -1108,8 +1203,8 @@ FEED_MAX_LINES = 500
 # "stats": anonymous usage stats on/off; "install_id": the random id they use;
 # "pending_joins": joins not sent to the stats server yet.
 DEFAULT_SETTINGS = {"interval": 25, "tiers": ["amateur"], "min_prize": 0, "auto_join": True,
-                    "open_page": True, "debug": False, "lang": None, "account": None,
-                    "stats": True, "install_id": None, "pending_joins": 0}
+                    "open_page": True, "hide_browser": False, "debug": False, "lang": None,
+                    "account": None, "stats": True, "install_id": None, "pending_joins": 0}
 
 
 def load_settings():
@@ -1374,24 +1469,28 @@ class App:
 
         self.autojoin_var = tk.BooleanVar(value=bool(self.settings.get("auto_join", True)))
         self.openpage_var = tk.BooleanVar(value=bool(self.settings.get("open_page", True)))
+        self.hide_var = tk.BooleanVar(value=bool(self.settings.get("hide_browser", False)))
         self.debug_var = tk.BooleanVar(value=bool(self.settings.get("debug", False)))
         self.stats_var = tk.BooleanVar(value=bool(self.settings.get("stats", True)))
         self.switches = {}
         for row, (key, var) in enumerate((("auto_join", self.autojoin_var),
                                           ("open_page", self.openpage_var),
+                                          ("hide_browser", self.hide_var),
                                           ("debug", self.debug_var),
                                           ("stats", self.stats_var)), start=7):
             sw = ctk.CTkSwitch(sett, text="", variable=var, font=font(13), text_color=TEXT,
-                               fg_color=CARD_2, progress_color=ACCENT, button_color=TEXT,
-                               button_hover_color="#ffffff")
+                               text_color_disabled=MUTED, fg_color=CARD_2, progress_color=ACCENT,
+                               button_color=TEXT, button_hover_color="#ffffff")
             sw.grid(row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(10 if row == 7 else 4, 4))
             self.switches[key] = sw
         self.switches["stats"].configure(command=self.on_stats_switch)   # applies right away
+        self.switches["hide_browser"].configure(command=self.sync_open_page)
+        self.sync_open_page()
         self.stats_note = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED,
                                        justify="left", anchor="w", wraplength=420)
-        self.stats_note.grid(row=11, column=0, columnspan=2, sticky="w", padx=(52, 4))
+        self.stats_note.grid(row=12, column=0, columnspan=2, sticky="w", padx=(52, 4))
         self.note_lbl = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED)
-        self.note_lbl.grid(row=12, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 4))
+        self.note_lbl.grid(row=13, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 4))
 
         # --- community line (filled by the usage-stats reply; hidden until then) ---
         self.comm = ctk.CTkFrame(body, fg_color="transparent")
@@ -1591,6 +1690,10 @@ class App:
         self.feed.configure(state="disabled")
 
     # --- settings ---
+    def sync_open_page(self):
+        """A hidden browser's page can't be seen, so 'Open the giveaway page' is off then."""
+        self.switches["open_page"].configure(state="disabled" if self.hide_var.get() else "normal")
+
     def read_config(self):
         tiers = {tier for tier, v in self.tier_vars.items() if v.get()}
         if not tiers:
@@ -1607,8 +1710,9 @@ class App:
             "min_prize": min_prize,
             "interval": min(120, max(10, int(round(self.slider.get())))),
             "debug": self.debug_var.get(),
-            "open_page": self.openpage_var.get(),
+            "open_page": self.openpage_var.get() and not self.hide_var.get(),
             "auto_join": self.autojoin_var.get(),
+            "hide": self.hide_var.get(),
         }
 
     def save_settings(self):
@@ -1620,6 +1724,7 @@ class App:
                                          parse_min_prize(self.settings.get("min_prize"), 0.0)),
             "auto_join": self.autojoin_var.get(),
             "open_page": self.openpage_var.get(),
+            "hide_browser": self.hide_var.get(),
             "debug": self.debug_var.get(),
             "lang": _LANG["v"],
             "account": self.settings.get("account"),
@@ -1684,7 +1789,10 @@ class App:
         stop_event.clear()
         threading.Thread(target=check_main, daemon=True).start()
 
-    def start_session(self):
+    def start_session(self, show=False):
+        """Open the browser (hidden if chosen in Settings; show=True: as a window anyway)."""
+        session_opts.clear()
+        session_opts.update(hide=self.hide_var.get(), show=show)
         self.running = True
         self.set_status("st_opening")
         if self.checking:   # the check still has the profile open: end it, "checked" goes on
@@ -1711,7 +1819,7 @@ class App:
             return
         monitor_event.clear()
         self.monitoring = False
-        self.start_session()
+        self.start_session(show=True)   # the Steam login needs the window
         self.refresh_controls()
 
     def on_start(self):

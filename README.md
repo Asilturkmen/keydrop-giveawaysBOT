@@ -153,6 +153,7 @@ Open the **Settings** tab in the app. Your choices are remembered.
 - **Min. prize value (USD)**: skip giveaways whose prize is worth less, e.g. `2` skips skins under 2 USD (0 = off, the default). Prices in other currencies are converted with Keydrop's own rates.
 - **Auto-join**: join automatically when you're eligible (on by default).
 - **Open the giveaway page**: open a new giveaway's page even when not auto-joining.
+- **Hide the browser**: the bot's Chrome window stays hidden while it works (off by default). A window opens only when you need to log in with Steam, and closes again after the login. Applies the next time you press START.
 - **DEBUG**: write `debug_payloads.json` for troubleshooting.
 - **Anonymous usage stats**: on by default; feeds the live numbers above. Sends only a random ID, the app version, the language and the join count ([details](#-security--privacy)).
 
