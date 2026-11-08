@@ -8,6 +8,7 @@ Control everything from this window (dark, Keydrop-style UI built with CustomTki
   - Live status with countdown, session stats, an activity feed and a settings tab
   - TR / EN toggle; settings are remembered in settings.json
   - The browser can run hidden (Settings); a window then opens only for the Steam login
+  - The activity feed is also kept in keydrop_bot.log (Steam name left out) for problem reports
   - A banner offers a one-click update when a newer release is on GitHub
   - Anonymous usage stats (random copy + computer ids, version, language, join count; can be
     turned off)
@@ -28,6 +29,7 @@ import ctypes
 import io
 import json
 import os
+import platform
 import queue
 import re
 import subprocess
@@ -37,7 +39,7 @@ import time
 import urllib.request
 import uuid
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import tkinter as tk
@@ -46,13 +48,16 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw
 from playwright.async_api import async_playwright
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 # --------------------------- CONSTANTS ------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent       # project folder (src/..)
 USER_DATA_DIR = ROOT / "keydrop_profile"           # browser profile = your Keydrop login
 DEBUG_FILE = ROOT / "debug_payloads.json"
+# The activity feed is also written here (Steam name masked), to send when reporting a problem.
+LOG_FILE = ROOT / "keydrop_bot.log"
+LOG_MAX_BYTES = 1_000_000   # then it moves to keydrop_bot.log.old (so at most ~2 MB in all)
 SETTINGS_FILE = ROOT / "settings.json"
 AVATAR_FILE = ROOT / "avatar.jpg"                  # your Steam profile photo (account card)
 LAUNCHER = ROOT / "KeydropBot.bat"
@@ -85,12 +90,21 @@ JOIN_ATTEMPTS = 3
 LOGIN_POLL = 3
 # Max seconds for the hidden login check that runs when the app opens / the bot stops.
 LOGIN_CHECK_TIMEOUT = 25
+# Not eligible for a tier (no recent deposit): ask Keydrop again this often (seconds)
+# instead of opening every new giveaway of that tier.
+ELIGIBILITY_RECHECK = 30 * 60
+# Joins a day Keydrop allows per tier (known limits only); its day is the UTC day.
+DAILY_LIMITS = {"amateur": 60}
+# The hidden browser closed by itself (crash): reopen it at most this often in this window.
+BROWSER_RESTARTS = 3
+BROWSER_RESTART_WINDOW = 30 * 60
 
 # Updates: the newest GitHub release replaces these files.
 GITHUB_REPO = "Asilturkmen/keydrop-giveawaysBOT"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RAW_FILE_URL = "https://raw.githubusercontent.com/" + GITHUB_REPO + "/{tag}/{path}"
 UPDATE_FILES = ("src/keydrop_ui.py", "src/requirements.txt")
+UPDATE_EVERY = 6 * 3600   # while the app is open, look for a new release this often (seconds)
 CREATOR_URL = "https://asilturkmen.com"   # the credit line at the bottom of the window
 
 # Anonymous usage stats (README → Privacy): a random id for this copy (bot folder), a random id
@@ -165,7 +179,8 @@ TXT = {
     "checking_now": {"en": "·  checking...", "tr": "·  kontrol ediliyor..."},
     "safety":       {"en": "The bot never deposits money. It only joins when your entry is free.",
                      "tr": "Bot asla para yatırmaz. Yalnızca katılımın ücretsizse katılır."},
-    "stat_joined":  {"en": "Joined", "tr": "Katılınan"},
+    "stat_today":   {"en": "Joined today", "tr": "Bugün katılınan"},
+    "stat_today_tier": {"en": "{tier} today", "tr": "{tier} bugün"},
     "stat_last":    {"en": "Last join", "tr": "Son katılım"},
     "stat_tiers":   {"en": "Watching", "tr": "Takip edilen"},
 
@@ -178,7 +193,7 @@ TXT = {
     "set_min_prize": {"en": "Min. prize value (USD)", "tr": "Min. ödül değeri (USD)"},
     "min_prize_note": {"en": "Skips giveaways whose prize is worth less. 0 = off.",
                        "tr": "Ödülü bundan ucuz olan çekilişlere katılmaz. 0 = kapalı."},
-    "open_page":    {"en": "Open the giveaway page when a new one appears (when auto-join is off)",
+    "open_page":    {"en": "Open each new giveaway's page (when auto-join is off)",
                      "tr": "Yeni çekilişte çekiliş sayfasını aç (otomatik katıl kapalıyken)"},
     "auto_join":    {"en": "Auto-join (only when eligible, never deposits money)",
                      "tr": "Otomatik katıl (yalnızca şart sağlanmışsa, asla para yatırmaz)"},
@@ -286,12 +301,24 @@ TXT = {
                               "durduruldu. Kilit {until}'te biter; o saatten sonra BAŞLAT'a bas."},
     "log_already_joined": {"en": "Already joined this giveaway (entries: {n}).",
                            "tr": "Bu çekilişe zaten katılmışsın (giriş: {n})."},
-    "log_not_eligible": {"en": "Not eligible: Keydrop requires a {req} {cur} deposit within your "
-                               "level's time window ({miss} {cur} missing). The bot never "
-                               "deposits money; skipped.",
-                         "tr": "Katılım şartı sağlanmıyor: Keydrop, seviyene göre belirlenen süre "
-                               "içinde {req} {cur} yatırım istiyor ({miss} {cur} eksik). Bot asla "
-                               "para yatırmaz; atlandı."},
+    "log_not_eligible": {"en": "{tier}: your account can't join right now. Keydrop wants a {req} {cur} "
+                               "deposit within your level's time window ({miss} {cur} missing). The "
+                               "bot never deposits money. It waits and checks again every 30 minutes; "
+                               "after a deposit it starts joining by itself.",
+                         "tr": "{tier}: hesabın şu an katılamıyor. Keydrop, seviyene göre belirlenen "
+                               "süre içinde {req} {cur} yatırım istiyor ({miss} {cur} eksik). Bot asla "
+                               "para yatırmaz. Bekliyor ve 30 dakikada bir tekrar bakıyor; yatırım "
+                               "yaptığında kendiliğinden katılmaya başlar."},
+    "log_eligible_again": {"en": "{tier}: the deposit requirement is met now; joining again.",
+                           "tr": "{tier}: katılım şartı artık sağlanıyor; katılmaya devam ediliyor."},
+    "log_browser_crashed": {"en": "The hidden browser closed unexpectedly; reopening it...",
+                            "tr": "Gizli tarayıcı beklenmedik şekilde kapandı; yeniden açılıyor..."},
+    "log_browser_crash_stop": {"en": "The hidden browser keeps closing unexpectedly, so the bot "
+                                     "stopped. Press START to try again; if it happens again, send "
+                                     "keydrop_bot.log (in the bot's folder) with your report.",
+                               "tr": "Gizli tarayıcı sürekli beklenmedik şekilde kapanıyor, bot "
+                                     "durduruldu. Tekrar denemek için BAŞLAT'a bas; yine olursa "
+                                     "bildirirken botun klasöründeki keydrop_bot.log dosyasını gönder."},
     "log_logged_out": {"en": "Your Keydrop session ended! Log in again with Steam in the browser "
                              "window; the bot continues by itself.",
                        "tr": "Keydrop oturumun kapandı! Tarayıcı penceresinde Steam ile tekrar "
@@ -418,7 +445,7 @@ def summarize(data):
     if "participantCount" in data:
         mx = data.get("maxUsers", "?")
         bits.append(f"{t('sum_participants')}={data['participantCount']}/{mx}")
-    if "deadlineTimestamp" in data:
+    if data.get("deadlineTimestamp"):   # a brand-new giveaway may not have it yet
         bits.append(f"{t('sum_remaining')}={_fmt_deadline(data['deadlineTimestamp'])}")
     if "depositAmountRequired" in data and data["depositAmountRequired"]:
         bits.append(f"{t('sum_deposit')}={data['depositAmountRequired']}"
@@ -671,6 +698,19 @@ def fetch_avatar(url):
         pass
 
 
+def log_to_file(text):
+    """Add a line to keydrop_bot.log (moved to .log.old past LOG_MAX_BYTES). The Windows user
+    folder is shortened so the file can be shared; callers leave the Steam name out."""
+    text = str(text).replace(str(Path.home()), "%USERPROFILE%")
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > LOG_MAX_BYTES:
+            LOG_FILE.replace(LOG_FILE.with_name(LOG_FILE.name + ".old"))
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {text}\n")
+    except OSError:
+        pass
+
+
 # --------------------------- WORKER (async) ------------------------
 
 def install_chromium():
@@ -749,7 +789,11 @@ async def session_main():
     debug_other = []   # non-JSON / failed giveaway requests (helps when the list won't load)
     closed = {"v": False}   # the user closed the browser window
     failed = {"v": False}   # the browser couldn't be (re)opened
-    browser = {"pw": None, "ctx": None, "page": None, "hidden": False}
+    # "tab": the second tab that shows a new giveaway ("Open the giveaway page" without
+    # auto-join); "crashed": the hidden browser closed by itself.
+    browser = {"pw": None, "ctx": None, "page": None, "hidden": False, "tab": None,
+               "crashed": False}
+    restarts = []   # when the hidden browser was reopened after a crash
     # "hidden": run the browser hidden when no login is needed (Settings);
     # "keep_window": Keydrop didn't answer while hidden, so the window stays this session.
     want = {"hidden": bool(session_opts.get("hide")), "keep_window": False}
@@ -758,9 +802,9 @@ async def session_main():
         return stop_event.is_set() or closed["v"] or failed["v"]
 
     async def nap(secs):
-        """Sleep that wakes up early when the session ends."""
+        """Sleep that wakes up early when the session ends (or the hidden browser closed)."""
         waited = 0.0
-        while waited < secs and not should_stop():
+        while waited < secs and not should_stop() and not browser["crashed"]:
             await asyncio.sleep(0.3)
             waited += 0.3
 
@@ -815,8 +859,16 @@ async def session_main():
             q_alert(t("log_browser_fail", e=str(e).strip().splitlines()[0] if str(e).strip() else e))
             failed["v"] = True
             return False
-        browser.update(ctx=ctx, hidden=hidden)
-        ctx.on("close", lambda _: closed.__setitem__("v", True) if browser["ctx"] is ctx else None)
+        browser.update(ctx=ctx, hidden=hidden, crashed=False, tab=None)
+
+        def on_close(_):
+            if browser["ctx"] is not ctx:      # closed on purpose (reopened / session over)
+                return
+            if hidden:                         # nobody can close a hidden browser: it crashed
+                browser["crashed"] = True
+            else:                              # the user closed the window
+                closed["v"] = True
+        ctx.on("close", on_close)
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         browser["page"] = page
         page.on("response", lambda r: asyncio.create_task(handle_response(r)))
@@ -828,6 +880,27 @@ async def session_main():
             if not should_stop():
                 q_log(t("log_page_fail", e=e))
         return True
+
+    async def reopen_after_crash():
+        """Open the hidden browser again after it closed by itself; False (bot stops) when
+        that keeps happening."""
+        now = time.time()
+        restarts[:] = [at for at in restarts if now - at < BROWSER_RESTART_WINDOW]
+        if len(restarts) >= BROWSER_RESTARTS:
+            q_alert(t("log_browser_crash_stop"))
+            return False
+        restarts.append(now)
+        q_alert(t("log_browser_crashed"))
+        return await open_browser(hidden=True)
+
+    async def show_in_tab(url):
+        """Show a giveaway in the second tab (made once, then reused), so the list keeps
+        its own tab and the page stays open for the user."""
+        tab = browser["tab"]
+        if tab is None or tab.is_closed():
+            tab = browser["tab"] = await browser["ctx"].new_page()
+        await tab.goto(url, wait_until="domcontentloaded")
+        await tab.bring_to_front()
 
     async def wait_for_login():
         """Return True once Keydrop says we're logged in, False if the session ends first.
@@ -848,7 +921,7 @@ async def session_main():
                 if ok:
                     session["logged_in"] = True
                     q_account("in", name, avatar)
-                    q_log(t("log_logged_in", name=name or "?"))
+                    ui_queue.put(("logged_in", name))   # the log file gets it without the name
                     if want["hidden"] and not want["keep_window"] and not browser["hidden"]:
                         q_log(t("log_hiding_browser"))
                         await open_browser(hidden=True)
@@ -879,10 +952,16 @@ async def session_main():
     # tier -> blockedUntil (ms). Keydrop locks a tier after its daily join limit
     # (amateur: 60 a day) until 00:00 UTC; the site then shows a countdown, no join button.
     blocked = {}
+    # tier -> when to ask Keydrop again. The account can't join that tier now (no recent
+    # deposit), which won't change by itself, so its giveaways aren't opened until then.
+    waiting = {}
 
     def tier_blocked(tier):
         until = blocked.get(tier)
         return isinstance(until, (int, float)) and until / 1000 > time.time()
+
+    def tier_waiting(tier):
+        return waiting.get(tier, 0) > time.time()
 
     def lock_end(until_ms):
         """When a lock ends, for the log (Keydrop says 23:59:59 UTC, shown as the next minute)."""
@@ -896,7 +975,7 @@ async def session_main():
         else:
             q_log(t(key, a=attempts[gid], n=JOIN_ATTEMPTS))
 
-    async def join_giveaway(page, gid):
+    async def join_giveaway(page, gid, tier):
         """On the already opened detail page: join `gid` only if Keydrop says we're
         eligible (deposit requirement already met, so joining is free), then verify."""
         info = await wait_detail(gid)
@@ -910,17 +989,22 @@ async def session_main():
             return
         until = info.get("blockedUntil")
         if isinstance(until, (int, float)) and until / 1000 > time.time():
-            tier = str(info.get("frequency") or "").strip().lower()
             blocked[tier] = until
             done.add(gid)
             q_alert(t("log_tier_blocked", tier=tier.upper(), until=lock_end(until)))
+            ui_queue.put(("locked", tier))   # the "today" counter: the limit is reached
             return
         missing = info.get("depositAmountMissing")
         if not isinstance(missing, (int, float)) or missing > 0:
             done.add(gid)
-            q_log(t("log_not_eligible", req=info.get("depositAmountRequired"), miss=missing,
-                    cur=info.get("depositAmountCurrency", "")))
+            if tier not in waiting:   # said once; later checks are quiet
+                q_alert(t("log_not_eligible", tier=tier.upper(),
+                          req=info.get("depositAmountRequired"), miss=missing,
+                          cur=info.get("depositAmountCurrency", "")))
+            waiting[tier] = time.time() + ELIGIBILITY_RECHECK
             return
+        if waiting.pop(tier, None) is not None:
+            q_log(t("log_eligible_again", tier=tier.upper()))
         # Eligible: wait for the join button to render (max 8 s), then click it.
         clicked = None
         for _ in range(16):
@@ -939,8 +1023,8 @@ async def session_main():
         if after and after.get("haveIJoined") is True:
             done.add(gid)
             joined_ids.add(gid)
-            ui_queue.put(("joined", t("alert_auto_joined", clicked=repr(clicked),
-                                      n=after.get("myJoinCount", "?"))))
+            ui_queue.put(("joined", (t("alert_auto_joined", clicked=repr(clicked),
+                                       n=after.get("myJoinCount", "?")), tier)))
         else:
             failed_attempt(gid, "log_join_unverified")
 
@@ -966,7 +1050,9 @@ async def session_main():
         q_log(t("log_monitor_start", tiers=sorted(watch_tiers), interval=interval))
 
         while not should_stop():
-            page = browser["page"]        # a new one after a login window (hidden mode)
+            if browser["crashed"] and not await reopen_after_crash():
+                break
+            page = browser["page"]        # a new one after a login window / a crash
             if page.is_closed():          # the user closed the bot's tab
                 closed["v"] = True
                 break
@@ -979,7 +1065,7 @@ async def session_main():
                 try:
                     await page.goto(GIVEAWAYS_URL, wait_until="domcontentloaded")
                 except Exception as e:
-                    if should_stop():
+                    if should_stop() or browser["crashed"]:
                         break
                     q_log(t("log_page_fail_try", a=attempt, n=LIST_LOAD_RETRIES, e=e))
                 # Wait for the official tier list (max LIST_LOAD_TIMEOUT s). Creator giveaway
@@ -993,13 +1079,15 @@ async def session_main():
                 if got_list_data(payloads):
                     loaded = True
                     break
-                if should_stop():
+                if should_stop() or browser["crashed"]:
                     break
                 q_log(t("log_list_retry", a=attempt, n=LIST_LOAD_RETRIES))
                 await nap(2)
 
             if should_stop():
                 break
+            if browser["crashed"]:        # reopened at the top of the loop
+                continue
 
             found = collect_giveaways(list(payloads), list(ws_frames), watch_tiers)
 
@@ -1034,7 +1122,8 @@ async def session_main():
             else:
                 joinable = {g: i for g, i in found.items() if is_joinable(i["data"])}
                 for gid, info in joinable.items():
-                    if gid not in notified and not tier_blocked(info["tier"]):
+                    if (gid not in notified and not tier_blocked(info["tier"])
+                            and not tier_waiting(info["tier"])):
                         q_alert(t("alert_joinable", tier=info['tier'].upper(),
                                   summary=summarize(info['data'])))
                         notified.add(gid)
@@ -1055,30 +1144,34 @@ async def session_main():
                     dl = joinable[g]["data"].get("deadlineTimestamp")
                     return dl if isinstance(dl, (int, float)) and dl > 0 else float("inf")
                 pending = sorted((g for g in joinable if g not in done
-                                  and not tier_blocked(joinable[g]["tier"])), key=ends_at)
+                                  and not tier_blocked(joinable[g]["tier"])
+                                  and not tier_waiting(joinable[g]["tier"])), key=ends_at)
                 if not (open_page or auto_join):
                     done.update(pending)   # alert-only mode
                     pending = []
 
                 # One giveaway per round: open its detail page, join it if Keydrop says
                 # we're eligible, then RETURN to the giveaway list so monitoring continues.
+                # Without auto-join the page opens in a second tab and stays there for the user.
                 if pending:
                     last_no_new = None
                     gid = pending[0]
                     url = detail_url(joinable[gid]["data"], gid)
                     try:
-                        details.pop(gid, None)
-                        await page.goto(url, wait_until="domcontentloaded")
-                        q_log(t("log_detail_open", url=url))
                         if auto_join:
-                            await join_giveaway(page, gid)
+                            details.pop(gid, None)
+                            await page.goto(url, wait_until="domcontentloaded")
+                            q_log(t("log_detail_open", url=url))
+                            await join_giveaway(page, gid, joinable[gid]["tier"])
                             await asyncio.sleep(1)
                             await page.goto(GIVEAWAYS_URL, wait_until="domcontentloaded")
                             q_log(t("log_back_to_list"))
                         else:
+                            await show_in_tab(url)
+                            q_log(t("log_detail_open", url=url))
                             done.add(gid)
                     except Exception as e:
-                        if not should_stop():
+                        if not should_stop() and not browser["crashed"]:
                             q_log(t("log_detail_err", e=e))
 
                 # Every round would add a line (thousands a day); the countdown already
@@ -1225,10 +1318,16 @@ FEED_MAX_LINES = 500
 # "stats": anonymous usage stats on/off; "install_id": the random id of this copy;
 # "joins_total": giveaways joined while the stats were on (sent as a total, so a lost reply
 # can't count them twice); "pending_joins": old-style count from v1.3.0 not sent yet.
+# "today": joins on Keydrop's current day {"day": "YYYY-MM-DD" (UTC), "tiers": {tier: n}}.
 DEFAULT_SETTINGS = {"interval": 25, "tiers": ["amateur"], "min_prize": 0, "auto_join": True,
                     "open_page": True, "hide_browser": False, "debug": False, "lang": None,
                     "account": None, "stats": True, "install_id": None, "joins_total": 0,
-                    "pending_joins": 0}
+                    "pending_joins": 0, "today": None}
+
+
+def keydrop_day():
+    """Keydrop's day (its daily join limits end at 00:00 UTC)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def load_settings():
@@ -1298,7 +1397,6 @@ class App:
         # With a browser profile, the hidden login check starts right away (see start_check).
         self.account = ("checking", None) if USER_DATA_DIR.exists() else ("unknown", None)
         self.avatar_photo = load_avatar() if self.settings["account"] else None
-        self.joined = 0
         self.last_join = None
         self.checking = False       # the hidden login check is running
         self.running = False        # a browser session is open (or waiting for the check)
@@ -1310,6 +1408,10 @@ class App:
         self.pulse = False
         self.pinging = False        # a usage-stats ping is on its way
         self.last_ping = 0.0
+        self.last_update_check = 0.0
+        self.shown_day = None       # Keydrop's day the "today" counter shows
+        log_to_file(f"=== Keydrop Bot v{__version__} opened · {platform.platform()} · "
+                    f"Python {platform.python_version()} ===")
 
         # As tall as the screen comfortably allows (small laptops: 600, big screens: 760).
         try:
@@ -1511,7 +1613,7 @@ class App:
         self.switches["hide_browser"].configure(command=self.sync_open_page)
         self.sync_open_page()
         self.stats_note = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED,
-                                       justify="left", anchor="w", wraplength=420)
+                                       justify="left", anchor="w", wraplength=370)   # indented
         self.stats_note.grid(row=12, column=0, columnspan=2, sticky="w", padx=(52, 4))
         self.note_lbl = ctk.CTkLabel(sett, text="", font=font(11), text_color=MUTED)
         self.note_lbl.grid(row=13, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 4))
@@ -1529,7 +1631,7 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(150, self.poll_queue)
         root.after(700, self.tick)
-        threading.Thread(target=check_update, daemon=True).start()
+        self.check_for_update()
         self.ping()
         self.start_check()
 
@@ -1552,8 +1654,8 @@ class App:
             self.update_lbl.configure(text=t("update_available", tag=self.update_tag))
         self.login_btn.configure(text=t("login"))
         self.safety_lbl.configure(text=t("safety"))
-        for cap, key in zip(self.stat_caps, ("stat_joined", "stat_last", "stat_tiers")):
-            cap.configure(text=t(key))
+        for cap, key in zip(self.stat_caps[1:], ("stat_last", "stat_tiers")):
+            cap.configure(text=t(key))   # the first one ("today") is set in update_stats
         self.clear_btn.configure(text=t("clear_log"))
         self.int_lbl.configure(text=t("set_interval"))
         self.on_interval(self.slider.get())
@@ -1675,14 +1777,43 @@ class App:
                                    hover_color=ACCENT_HOVER, text_color=ON_ACCENT)
         self.login_btn.configure(state="disabled" if self.running else "normal")
 
+    def today_counts(self):
+        """Joins per tier on Keydrop's current day (a new day starts from zero)."""
+        today = self.settings.get("today")
+        if not (isinstance(today, dict) and today.get("day") == keydrop_day()
+                and isinstance(today.get("tiers"), dict)):
+            today = self.settings["today"] = {"day": keydrop_day(), "tiers": {}}
+        return today["tiers"]
+
     def update_stats(self):
-        chosen = [tier.capitalize() for tier in ALL_TIERS if self.tier_vars[tier].get()]
-        watching = "—" if not chosen else chosen[0] + (f" +{len(chosen) - 1}" if len(chosen) > 1 else "")
-        for lbl, value in zip(self.stat_vals, (str(self.joined), self.last_join or "—", watching)):
+        chosen = [tier for tier in ALL_TIERS if self.tier_vars[tier].get()]
+        names = [tier.capitalize() for tier in chosen]
+        watching = "—" if not names else names[0] + (f" +{len(names) - 1}" if len(names) > 1 else "")
+        # Today: against Keydrop's daily limit when a watched tier has one (Amateur: 42/60).
+        counts = {k: v for k, v in self.today_counts().items() if isinstance(v, int)}
+        limited = [tier for tier in chosen if tier in DAILY_LIMITS]
+        if limited:
+            tier = limited[0]
+            today = f"{counts.get(tier, 0)}/{DAILY_LIMITS[tier]}"
+            self.stat_caps[0].configure(text=t("stat_today_tier", tier=tier.capitalize()))
+        else:
+            today = str(sum(counts.values()))
+            self.stat_caps[0].configure(text=t("stat_today"))
+        self.shown_day = keydrop_day()
+        for lbl, value in zip(self.stat_vals, (today, self.last_join or "—", watching)):
             lbl.configure(text=value)
+
+    def count_join(self, tier):
+        """A verified join for the "today" counter (kept across restarts until the day ends)."""
+        counts = self.today_counts()
+        counts[tier] = (counts.get(tier) if isinstance(counts.get(tier), int) else 0) + 1
 
     def on_interval(self, value):
         self.int_val.configure(text=t("set_interval_val", s=int(round(float(value)))))
+
+    def check_for_update(self):
+        self.last_update_check = time.time()
+        threading.Thread(target=check_update, daemon=True).start()
 
     def tick(self):
         """Pulsing dot + 'next check in Xs' while the bot runs."""
@@ -1695,10 +1826,16 @@ class App:
                     text=t("next_check", s=left) if left > 0 else t("checking_now"))
         if self.monitoring and time.time() - self.last_ping >= STATS_EVERY:
             self.ping()
+        if time.time() - self.last_update_check >= UPDATE_EVERY:   # the app may stay open for days
+            self.check_for_update()
+        if keydrop_day() != self.shown_day:   # Keydrop's new day: the counter starts again
+            self.update_stats()
         self.root.after(700, self.tick)
 
     # --- feed ---
-    def append(self, text, tag="info"):
+    def append(self, text, tag="info", file_text=None):
+        """Add a line to the activity feed and the log file (`file_text` there, if given)."""
+        log_to_file(file_text or text)
         self.feed.configure(state="normal")
         self.feed.insert("end", f"{datetime.now():%H:%M:%S}  ", "time")
         self.feed.insert("end", f"{text}\n", tag)
@@ -1756,6 +1893,7 @@ class App:
             "install_id": self.settings.get("install_id"),
             "joins_total": self.joins_total(),
             "pending_joins": self.pending_joins(),
+            "today": self.settings.get("today"),
         }
         self.settings["min_prize"] = data["min_prize"]
         try:
@@ -1860,6 +1998,10 @@ class App:
         self.save_settings()
         run_config.clear()
         run_config.update(config)
+        log_to_file("START · " + ", ".join(
+            f"{k}={sorted(v) if isinstance(v, set) else v}" for k, v in config.items()))
+        if time.time() - self.last_update_check > 60:   # a release may be out since the app opened
+            self.check_for_update()
         monitor_event.set()
         self.monitoring = True
         self.next_check_at = None
@@ -1921,13 +2063,25 @@ class App:
                 elif kind == "alert":
                     self.append(payload, "alert")
                 elif kind == "joined":
-                    self.append(payload, "success")
-                    self.joined += 1
+                    text, tier = payload
+                    self.append(text, "success")
                     self.last_join = datetime.now().strftime("%H:%M")
+                    self.count_join(tier)
                     self.update_stats()
                     if self.stats_var.get():   # counted with the next usage-stats ping
                         self.settings["joins_total"] = self.joins_total() + 1
+                    self.save_settings()
+                elif kind == "locked":
+                    # Keydrop says the tier's daily limit is reached: show it as full.
+                    if payload in DAILY_LIMITS:
+                        counts = self.today_counts()
+                        counts[payload] = max(counts.get(payload) if isinstance(
+                            counts.get(payload), int) else 0, DAILY_LIMITS[payload])
+                        self.update_stats()
                         self.save_settings()
+                elif kind == "logged_in":
+                    self.append(t("log_logged_in", name=payload or "?"),
+                                file_text=t("log_logged_in", name="<account>"))
                 elif kind == "status":
                     self.set_status(payload)
                 elif kind == "account":
@@ -1955,9 +2109,10 @@ class App:
                 elif kind == "next_check":
                     self.next_check_at = time.time() + payload
                 elif kind == "update":
-                    self.update_tag = payload
-                    self.update_lbl.configure(text=t("update_available", tag=payload))
-                    self.update_bar.pack(fill="x", pady=(12, 0), before=self.acc_card)
+                    if payload != self.update_tag:   # the check repeats every few hours
+                        self.update_tag = payload
+                        self.update_lbl.configure(text=t("update_available", tag=payload))
+                        self.update_bar.pack(fill="x", pady=(12, 0), before=self.acc_card)
                 elif kind == "update_done":
                     self.append(t("log_update_done", tag=payload), "success")
                     if LAUNCHER.exists():

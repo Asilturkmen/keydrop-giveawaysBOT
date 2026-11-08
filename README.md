@@ -67,7 +67,7 @@ If you've been searching for a **Keydrop bot**, a **Keydrop giveaways bot**, a *
 | Feature | Description |
 |--------|-------------|
 | **One-click setup** | Double-click `KeydropBot.bat`. No Python, no commands, it installs everything itself |
-| **Modern one-button app** | Big START / STOP button, account card, live status with countdown, session stats |
+| **Modern one-button app** | Big START / STOP button, account card, live status with countdown, today's joins against Keydrop's daily limit |
 | **Keydrop giveaways auto join** | Joins every giveaway you're eligible for and verifies the entry with Keydrop |
 | **Deposit safety** | Never deposits, never clicks deposit / extra-entry buttons; tells you if a deposit is missing |
 | **Automatic login detection** | Log in with Steam once; the bot notices by itself, remembers your session and shows your Steam photo |
@@ -119,7 +119,7 @@ Keep this browser window open while the bot runs (you can minimize it).
 The status says **Running** with a countdown to the next check. Every giveaway it joins shows up in green in the activity feed and in the **Joined** counter. Press **STOP** any time.
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Keydrop Bot running: joined counter, last join time, next check countdown and the activity feed" width="380" />
+  <img src="docs/screenshot.png" alt="Keydrop Bot running: today's joins against the daily limit, last join time, next check countdown and the activity feed" width="380" />
 </p>
 
 ---
@@ -136,9 +136,9 @@ Keydrop only lets you join a giveaway if you deposited a **minimum amount within
 | 30+ | 10 days |
 | 50+ | 14 days |
 
-The minimum is set per giveaway (Amateur: 2 USD at the time of writing; higher tiers ask more). **If you meet it, joining is free and the bot joins for you.** If you don't, the bot skips the giveaway and tells you how much is missing, for example:
+The minimum is set per giveaway (Amateur: 2 USD at the time of writing; higher tiers ask more). **If you meet it, joining is free and the bot joins for you.** If you don't, the bot tells you once how much is missing and then waits, checking again every 30 minutes, for example:
 
-> *Not eligible: Keydrop requires a 2 USD deposit within your level's time window (2 USD missing). The bot never deposits money; skipped.*
+> *AMATEUR: your account can't join right now. Keydrop wants a 2 USD deposit within your level's time window (2 USD missing). The bot never deposits money. It waits and checks again every 30 minutes; after a deposit it starts joining by itself.*
 
 Keydrop enters you automatically only once, right after your first deposit. After that you have to press "Join giveaway" for every new giveaway, and that's the part the bot does for you.
 
@@ -152,24 +152,25 @@ Open the **Settings** tab in the app. Your choices are remembered.
 - **Giveaway tiers**: Amateur by default; add Contender, Challenger, Champion.
 - **Min. prize value (USD)**: skip giveaways whose prize is worth less, e.g. `2` skips skins under 2 USD (0 = off, the default). Prices in other currencies are converted with Keydrop's own rates.
 - **Auto-join**: join automatically when you're eligible (on by default).
-- **Open the giveaway page**: open a new giveaway's page even when not auto-joining.
+- **Open the giveaway page**: when auto-join is off, open a new giveaway's page in a second tab, so you can join it yourself.
 - **Hide the browser**: the bot's Chrome window stays hidden while it works (off by default). A window opens only when you need to log in with Steam, and closes again after the login. Applies the next time you press START.
 - **DEBUG**: write `debug_payloads.json` for troubleshooting.
 - **Anonymous usage stats**: on by default; feeds the live numbers above. Sends only two random IDs, the app version, the language and the join count ([details](#-security--privacy)).
 
 <p align="center">
-  <img src="docs/settings.png" alt="Keydrop Bot settings tab: check interval slider, giveaway tiers, auto-join, open page and DEBUG switches" width="380" />
+  <img src="docs/settings.png" alt="Keydrop Bot settings tab: auto-join, open page, hide the browser, DEBUG and anonymous stats switches" width="380" />
 </p>
 
 ---
 
 ## 🛠️ Troubleshooting
 
-- **"Not eligible … missing"**: Keydrop wants a recent deposit (see the table above). The bot never deposits for you.
+- **"Your account can't join right now … missing"**: Keydrop wants a recent deposit (see the table above). The bot never deposits for you; it waits and starts joining by itself after your deposit.
 - **"Your Keydrop session ended"**: log in again with Steam in the bot's browser window; the bot continues by itself.
 - **"Locked until … (Keydrop's daily join limit)"**: Keydrop allows only a limited number of Amateur joins per day (about 60, so roughly 3 hours of the bot running) and then shows a countdown until 00:00 UTC (03:00 in Turkey). The bot skips a locked tier, and stops by itself when every tier you watch is locked. Press START again after the lock ends.
 - **"List didn't load" / "No records captured"**: turn on **DEBUG**, run the bot once and send the `debug_payloads.json` file from the bot's folder with your issue. It contains your Steam ID and username, so share it privately or remove them first.
 - **Setup failed**: check your internet connection and run `KeydropBot.bat` again; it continues where it stopped.
+- **Reporting a problem**: attach `keydrop_bot.log` from the bot's folder. It has the activity feed with dates, the app version and your settings; your Steam name is left out.
 
 ---
 
@@ -187,7 +188,7 @@ When a new version is released, the app shows a **"New version available"** bann
 - **`src/`**: the bot's code (`keydrop_ui.py`), its package list and icon
 - **`README.md`**: this guide
 
-Created while running (personal, **never pushed to GitHub**): `keydrop_profile/` (your browser session), `settings.json`, `avatar.jpg` (your Steam photo for the account card), `debug_payloads.json`, `.tools/`.
+Created while running (personal, **never pushed to GitHub**): `keydrop_profile/` (your browser session), `settings.json`, `avatar.jpg` (your Steam photo for the account card), `keydrop_bot.log` (the activity log, at most ~2 MB), `debug_payloads.json`, `.tools/`.
 
 **Uninstall:** delete the folder, the desktop shortcut and `%LOCALAPPDATA%\KeydropBot` (the stats' computer ID). The shared Python and browser downloads live in `%LOCALAPPDATA%\uv` and `%LOCALAPPDATA%\ms-playwright`; delete those too if nothing else uses them.
 

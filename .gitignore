@@ -11,6 +11,10 @@ settings.json
 # Your Steam profile photo (shown on the account card)
 avatar.jpg
 
+# The activity log (to send with a problem report)
+keydrop_bot.log
+keydrop_bot.log.old
+
 # Tools downloaded by KeydropBot.bat on the first run (uv)
 .tools/
 
